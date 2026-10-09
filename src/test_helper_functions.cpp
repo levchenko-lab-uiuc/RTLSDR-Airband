@@ -270,3 +270,109 @@ TEST_F(HelperFunctionsTest, setting_as_double_or_rejects_non_number) {
     double value = 0.0;
     EXPECT_FALSE(setting_as_double_or(config.getRoot(), "split_max_idle_time", 0.5, &value));
 }
+
+TEST_F(HelperFunctionsTest, fft_bin_width_divides_evenly) {
+    EXPECT_DOUBLE_EQ(fft_bin_width(2560000, 512), 5000.0);
+    EXPECT_DOUBLE_EQ(fft_bin_width(1024000, 1024), 1000.0);
+}
+
+// fft_size does not divide every sample rate evenly, and truncating the remainder away
+// drifts by a whole bin for channels far enough from the centre frequency.
+TEST_F(HelperFunctionsTest, fft_bin_width_does_not_divide_evenly) {
+    EXPECT_DOUBLE_EQ(fft_bin_width(10000000, 2048), 4882.8125);
+    EXPECT_DOUBLE_EQ(fft_bin_width(2400000, 512), 4687.5);
+}
+
+TEST_F(HelperFunctionsTest, fft_bin_for_center_frequency) {
+    EXPECT_EQ(fft_bin_for(124400000, 124400000, 10000000, 2048), 0u);
+}
+
+TEST_F(HelperFunctionsTest, fft_bin_for_wraps_below_the_center) {
+    const int center = 124400000;
+    EXPECT_EQ(fft_bin_for(center + 4883, center, 10000000, 2048), 1u);
+    EXPECT_EQ(fft_bin_for(center - 4883, center, 10000000, 2048), 2047u);
+}
+
+TEST_F(HelperFunctionsTest, fft_bin_for_rounds_to_the_nearest_bin) {
+    const int center = 124400000;
+    const double w = fft_bin_width(10000000, 2048);
+    EXPECT_EQ(fft_bin_for(center + (int)(3.4 * w), center, 10000000, 2048), 3u);
+    EXPECT_EQ(fft_bin_for(center + (int)(3.6 * w), center, 10000000, 2048), 4u);
+    EXPECT_EQ(fft_bin_for(center - (int)(3.4 * w), center, 10000000, 2048), 2045u);
+    EXPECT_EQ(fft_bin_for(center - (int)(3.6 * w), center, 10000000, 2048), 2044u);
+}
+
+// 124.850 MHz sits 92.16 bins above a 124.400 MHz centre at 10 Msps over 2048 bins, and an
+// off-air capture puts the carrier in bin 92.  120.975 MHz, 701.44 bins below, belongs in
+// 1347, not the 1346 that truncating towards the lower bin picks.
+TEST_F(HelperFunctionsTest, fft_bin_for_real_channels) {
+    const int center = 124400000;
+    EXPECT_EQ(fft_bin_for(124850000, center, 10000000, 2048), 92u);
+    EXPECT_EQ(fft_bin_for(120975000, center, 10000000, 2048), 1347u);
+    EXPECT_EQ(fft_bin_for(128750000, center, 10000000, 2048), 891u);
+}
+
+// Scan mode tunes 20 bins above the channel to keep it off the DC spike, so the channel has
+// to land exactly 20 bins below the centre whichever way the rate and size divide.
+TEST_F(HelperFunctionsTest, fft_bin_for_scan_mode_offset) {
+    const int freq = 121350000;
+    for (int rate : {2560000, 2400000, 10000000}) {
+        for (size_t size : {512u, 2048u}) {
+            const int center = freq + (int)(20 * fft_bin_width(rate, size));
+            EXPECT_EQ(fft_bin_for(freq, center, rate, size), size - 20) << "rate " << rate << " size " << size;
+        }
+    }
+}
+
+TEST_F(HelperFunctionsTest, next_fade_level_rises_over_the_attack) {
+    float f = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        f = next_fade_level(f, 1.0f, 16, 200);
+    }
+    EXPECT_FLOAT_EQ(f, 1.0f);
+}
+
+TEST_F(HelperFunctionsTest, next_fade_level_falls_over_the_release) {
+    float f = 1.0f;
+    for (int i = 0; i < 200; i++) {
+        f = next_fade_level(f, 0.0f, 16, 200);
+    }
+    // 1/200 is not exact in binary, so 200 steps leave a residue rather than landing on zero
+    EXPECT_NEAR(f, 0.0f, 1e-6f);
+    EXPECT_FLOAT_EQ(next_fade_level(f, 0.0f, 16, 200), 0.0f);
+}
+
+TEST_F(HelperFunctionsTest, next_fade_level_clamps) {
+    EXPECT_FLOAT_EQ(next_fade_level(1.0f, 1.0f, 16, 200), 1.0f);
+    EXPECT_FLOAT_EQ(next_fade_level(0.0f, 0.0f, 16, 200), 0.0f);
+}
+
+TEST_F(HelperFunctionsTest, next_fade_level_zero_length_switches_immediately) {
+    EXPECT_FLOAT_EQ(next_fade_level(0.0f, 1.0f, 0, 0), 1.0f);
+    EXPECT_FLOAT_EQ(next_fade_level(1.0f, 0.0f, 0, 0), 0.0f);
+}
+
+// The release is long so that a transmission's trailing close-delay ramps away, but an AM
+// envelope dips below the squelch level on modulation troughs too.  A dip of a few samples
+// must barely move the ramp, or speech would pump.
+TEST_F(HelperFunctionsTest, next_fade_level_short_dip_barely_moves_it) {
+    float f = 1.0f;
+    for (int i = 0; i < 8; i++) {
+        f = next_fade_level(f, 0.0f, 16, 200);
+    }
+    EXPECT_GT(f, 0.95f);
+    for (int i = 0; i < 8; i++) {
+        f = next_fade_level(f, 1.0f, 16, 200);
+    }
+    EXPECT_FLOAT_EQ(f, 1.0f);
+}
+
+// Ducking to a floor rather than closing: a carrier that flickers must not punch a hole.
+TEST_F(HelperFunctionsTest, next_fade_level_stops_at_a_floor) {
+    float f = 1.0f;
+    for (int i = 0; i < 500; i++) {
+        f = next_fade_level(f, 0.25f, 16, 64);
+    }
+    EXPECT_FLOAT_EQ(f, 0.25f);
+    EXPECT_FLOAT_EQ(next_fade_level(f, 0.25f, 16, 64), 0.25f);
+}
