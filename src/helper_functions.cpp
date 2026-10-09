@@ -18,6 +18,7 @@
  */
 
 #include <sys/stat.h>  // struct stat, S_ISDIR
+#include <cmath>       // llround
 #include <cstddef>     // size_t
 #include <cstring>     // strerror
 #include <libconfig.h++>
@@ -142,4 +143,27 @@ bool setting_as_bool_or(const libconfig::Setting& parent, const char* key, bool 
     }
     *value = (bool)parent[key];
     return true;
+}
+
+double fft_bin_width(int sample_rate, size_t fft_size) {
+    return (double)sample_rate / (double)fft_size;
+}
+
+size_t fft_bin_for(int freq, int centerfreq, int sample_rate, size_t fft_size) {
+    // Round to the nearest bin rather than truncating towards the one below: a channel
+    // sits wherever it sits between two bin centres, and the nearer of the two is the one
+    // carrying its energy.  Truncating biases every channel half a bin low on average.
+    const long long bin = llround((double)(freq - centerfreq) / fft_bin_width(sample_rate, fft_size)) % (long long)fft_size;
+    return (size_t)(bin < 0 ? bin + (long long)fft_size : bin);
+}
+
+float next_fade_level(float current, float target, size_t attack_samples, size_t release_samples) {
+    const bool rising = target > current;
+    const size_t length = rising ? attack_samples : release_samples;
+    const float step = length ? 1.0f / (float)length : 1.0f;
+    const float next = rising ? current + step : current - step;
+    if (rising) {
+        return next > target ? target : next;
+    }
+    return next < target ? target : next;
 }

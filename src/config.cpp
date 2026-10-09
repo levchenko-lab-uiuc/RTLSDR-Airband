@@ -297,8 +297,10 @@ static struct freq_t* mk_freqlist(int n) {
         fl[i].frequency = 0;
         fl[i].label = NULL;
         fl[i].agcavgfast = 0.5f;
+        fl[i].dcavg = 0.5f;
         fl[i].ampfactor = 1.0f;
         fl[i].squelch = Squelch();
+        fl[i].lookback_samples = AGC_EXTRA;
         fl[i].active_counter = 0;
         fl[i].modulation = MOD_AM;
     }
@@ -326,6 +328,23 @@ static int parse_anynum2int(libconfig::Setting& f) {
         free(s);
     }
     return ret;
+}
+
+// squelch_lookback is configured in milliseconds.  The delay line always holds at least the
+// AGC_EXTRA samples that the AGC has run ahead of the audio by since long before it existed, so a
+// lookback of zero leaves the timing of the audio path as it has always been.
+static size_t parse_squelch_lookback(const libconfig::Setting& setting, int devidx, int chanidx) {
+    if (libconfig::Setting::TypeInt != setting.getType()) {
+        cerr << "Configuration error: devices.[" << devidx << "] channels.[" << chanidx << "]: squelch_lookback must be an int or a list of ints (in milliseconds)\n";
+        error();
+    }
+    int lookback_ms = (int)setting;
+    if (lookback_ms < 0 || lookback_ms > MAX_SQUELCH_LOOKBACK_MS) {
+        cerr << "Configuration error: devices.[" << devidx << "] channels.[" << chanidx << "]: squelch_lookback must be between 0 and " << MAX_SQUELCH_LOOKBACK_MS << " ms\n";
+        error();
+    }
+    size_t lookback_samples = MS_TO_SAMPLES(lookback_ms);
+    return lookback_samples > (size_t)AGC_EXTRA ? lookback_samples : (size_t)AGC_EXTRA;
 }
 
 static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
@@ -448,7 +467,7 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
             }
             // Set initial frequency for scanning
             // We tune 20 FFT bins higher to avoid DC spike
-            dev->input->centerfreq = channel->freqlist[0].frequency + 20 * (double)(dev->input->sample_rate / fft_size);
+            dev->input->centerfreq = channel->freqlist[0].frequency + 20 * fft_bin_width(dev->input->sample_rate, fft_size);
         }
         if (chans[j].exists("squelch")) {
             cerr << "Warning: 'squelch' no longer supported and will be ignored, use 'squelch_threshold' or 'squelch_snr_threshold' instead\n";
@@ -533,6 +552,23 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
             } else {
                 cerr << "Invalid value for squelch_snr_threshold (should be float, int, or list of int/float - use parentheses)\n";
                 error();
+            }
+        }
+        if (chans[j].exists("squelch_lookback")) {
+            if (libconfig::Setting::TypeList == chans[j]["squelch_lookback"].getType()) {
+                if (chans[j]["squelch_lookback"].getLength() < channel->freq_count) {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: squelch_lookback should be an int or a list of ints with at least " << channel->freq_count
+                         << " elements\n";
+                    error();
+                }
+                for (int f = 0; f < channel->freq_count; f++) {
+                    channel->freqlist[f].lookback_samples = parse_squelch_lookback(chans[j]["squelch_lookback"][f], i, j);
+                }
+            } else {
+                size_t lookback_samples = parse_squelch_lookback(chans[j]["squelch_lookback"], i, j);
+                for (int f = 0; f < channel->freq_count; f++) {
+                    channel->freqlist[f].lookback_samples = lookback_samples;
+                }
             }
         }
         if (chans[j].exists("notch")) {
@@ -685,8 +721,7 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
         channel->outputs = (output_t*)XREALLOC(channel->outputs, outputs_enabled * sizeof(struct output_t));
         channel->output_count = outputs_enabled;
 
-        dev->base_bins[jj] = dev->bins[jj] =
-            (size_t)ceil((channel->freqlist[0].frequency + dev->input->sample_rate - dev->input->centerfreq) / (double)(dev->input->sample_rate / fft_size) - 1.0) % fft_size;
+        dev->base_bins[jj] = dev->bins[jj] = fft_bin_for(channel->freqlist[0].frequency, dev->input->centerfreq, dev->input->sample_rate, fft_size);
         debug_print("bins[%d]: %zu\n", jj, dev->bins[jj]);
 
 #ifdef NFM
@@ -731,6 +766,43 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
             channel->dm_dphi = (uint32_t)((int)dm_dphi);
             debug_print("dev[%d].chan[%d]: dm_dphi_scaled=%f cast=0x%x\n", i, jj, dm_dphi, channel->dm_dphi);
             channel->dm_phi = 0.f;
+        }
+
+        size_t max_lookback = 0;
+        for (int f = 0; f < channel->freq_count; f++) {
+            // NFM is demodulated from the current I/Q sample rather than from the lookback delay
+            // line, so it cannot be opened retroactively
+            if (channel->freqlist[f].modulation != MOD_AM) {
+                if (channel->freqlist[f].lookback_samples > (size_t)AGC_EXTRA) {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: squelch_lookback is only supported for AM channels\n";
+                    error();
+                }
+                channel->freqlist[f].lookback_samples = 0;
+            }
+            if (channel->freqlist[f].lookback_samples > max_lookback) {
+                max_lookback = channel->freqlist[f].lookback_samples;
+            }
+        }
+
+        if (max_lookback > (size_t)AGC_EXTRA) {
+            // Only the audio path runs behind, so anything else taken from the same channel drifts
+            // away from it by the length of the delay
+            if (channel->has_iq_outputs) {
+                log(LOG_WARNING, "Warning: dev[%d].channel[%d]: squelch_lookback delays audio output but not raw I/Q output, the two will be out of sync by up to %zu ms\n", i, j,
+                    max_lookback * 1000 / WAVE_RATE);
+            }
+            for (int o = 0; o < channel->output_count; o++) {
+                if (channel->outputs[o].type != O_MIXER) {
+                    continue;
+                }
+                mixer_t* mixer = ((mixer_data*)channel->outputs[o].data)->mixer;
+                if (!mixer->lookback_seen) {
+                    mixer->lookback_seen = true;
+                    mixer->lookback_samples = max_lookback;
+                } else if (mixer->lookback_samples != max_lookback) {
+                    log(LOG_WARNING, "Warning: dev[%d].channel[%d]: mixer \"%s\" mixes channels with different squelch_lookback values, their audio will be out of sync\n", i, j, mixer->name);
+                }
+            }
         }
 
 #ifdef DEBUG_SQUELCH
@@ -849,6 +921,21 @@ int parse_devices(libconfig::Setting& devs) {
         dev->bins = (size_t*)XREALLOC(dev->bins, channel_count * sizeof(size_t));
         dev->base_bins = (size_t*)XREALLOC(dev->base_bins, channel_count * sizeof(size_t));
         dev->channel_count = channel_count;
+
+        // Sized for the longest lookback any of the channel's frequencies asks for; the delay
+        // actually in use is selected per frequency by the demod loop
+        for (int j = 0; j < channel_count; j++) {
+            channel_t* channel = dev->channels + j;
+            size_t max_lookback = 0;
+            for (int f = 0; f < channel->freq_count; f++) {
+                if (channel->freqlist[f].lookback_samples > max_lookback) {
+                    max_lookback = channel->freqlist[f].lookback_samples;
+                }
+            }
+            channel->lookback.configure(max_lookback, AGC_EXTRA, MS_TO_SAMPLES(SQUELCH_LOOKBACK_QUIET_MS));
+            channel->lookback_freq_idx = -1;
+        }
+
         devcnt++;
     }
     return devcnt;

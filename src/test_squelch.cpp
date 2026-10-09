@@ -279,3 +279,4 @@ TEST_F(SquelchTest, close_ctcss) {
     EXPECT_EQ(squelch.ctcss_count(), 0);
     EXPECT_GT(squelch.no_ctcss_count(), 0);
 }
+
