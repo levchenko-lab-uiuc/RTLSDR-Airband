@@ -655,14 +655,34 @@ void* demodulate(void* params) {
                             // them in one pass and start tracking from the emitted sample, so that
                             // the first syllable is demodulated as well as the last - a loop
                             // started cold here would still be pulling in across it.
-                            if (is_open && !was_open) {
-                                float carrier_window[2 * MS_TO_SAMPLES(CARRIER_ESTIMATE_MS)];
-                                const size_t taken = channel->lookback.copy_iq(channel->lookback.delay(), MS_TO_SAMPLES(CARRIER_ESTIMATE_MS), carrier_window);
-                                fparms->carrier.acquire(CarrierTracker::estimate(carrier_window, taken), taken);
-                            } else if (!is_open && was_open) {
+                            const bool lost = !fparms->carrier.is_tracking() || fparms->carrier.lock() < CARRIER_RELOCK_LOCK;
+                            if (!is_open && was_open) {
                                 // Each transmission is acquired on its own; what the loop learned
                                 // about the last one is not evidence about the next.
                                 fparms->carrier.reset();
+                                fparms->carrier_retry = 0;
+                            } else if (is_open && (!was_open || lost)) {
+                                // Re-measuring matters most where squelch never transitions: a
+                                // continuous carrier is otherwise acquired once and can never
+                                // recover from a poor estimate or a fade.  Rate limited, because
+                                // the estimate walks a window and this would otherwise run on
+                                // every sample for as long as the lock stayed down.
+                                if (!was_open || fparms->carrier_retry == 0) {
+                                    float carrier_window[2 * MS_TO_SAMPLES(CARRIER_ESTIMATE_MS)];
+                                    const size_t taken = channel->lookback.copy_iq(channel->lookback.delay(), MS_TO_SAMPLES(CARRIER_ESTIMATE_MS), carrier_window);
+                                    const CarrierEstimate measured = CarrierTracker::estimate(carrier_window, taken);
+
+                                    // Only re-acquire onto something that is actually a carrier.
+                                    // At the end of a transmission the gate is still open while the
+                                    // signal collapses, and locking onto that noise would put a
+                                    // burst of it into the audio rather than a fade.
+                                    if (!was_open || measured.amplitude >= fparms->squelch.squelch_level()) {
+                                        fparms->carrier.acquire(measured, taken);
+                                    }
+                                    fparms->carrier_retry = MS_TO_SAMPLES(CARRIER_ESTIMATE_MS);
+                                } else {
+                                    fparms->carrier_retry--;
+                                }
                             }
 
                             float emitted_re = 0.0f;

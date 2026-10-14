@@ -90,6 +90,10 @@
 #define CARRIER_DAMPING 0.707f
 // Below the lowest audio frequency, so modulation averages out of the carrier level
 #define CARRIER_AMPLITUDE_HZ 20.0f
+// Lock below this means the counter-rotated sample is no longer consistently in phase, so the
+// carrier is worth measuring again.  A continuous carrier - an ATIS - is only acquired once
+// otherwise, and never recovers from a bad estimate or a fade.
+#define CARRIER_RELOCK_LOCK 0.5f
 #define SQUELCH_LOOKBACK_QUIET_MS 3
 #define SQUELCH_FADE_MS 5
 // The fade out is longer than the fade in, and starts SQUELCH_FADE_LEAD_MS before the carrier
@@ -289,6 +293,7 @@ struct freq_t {
     enum modulations modulation;
     enum am_detectors am_detector;
     CarrierTracker carrier;  // coherent AM only; idle and silent when am_detector is AM_ENVELOPE
+    size_t carrier_retry;    // samples to wait before measuring the carrier again after a lost lock
 };
 struct channel_t {
     float wavein[WAVE_LEN];      // FFT output waveform

@@ -281,6 +281,7 @@ static struct freq_t* mk_freqlist(int n) {
         fl[i].active_counter = 0;
         fl[i].modulation = MOD_AM;
         fl[i].am_detector = AM_ENVELOPE;
+        fl[i].carrier_retry = 0;
     }
     return fl;
 }

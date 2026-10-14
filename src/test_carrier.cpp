@@ -419,3 +419,24 @@ TEST_F(CarrierTest, acquire_can_rewind_to_the_start_of_the_window) {
         EXPECT_NEAR(tracker.track(iq[2 * n], iq[2 * n + 1]), 0.5, 0.02) << "at sample " << n;
     }
 }
+
+TEST_F(CarrierTest, acquiring_again_replaces_the_tracking_state) {
+    // A continuous carrier - an ATIS - never closes squelch, so it is acquired once and has to be
+    // able to recover from a lost lock without a transmission boundary to trigger it.
+    const vector<float> first = make_am(800, 0.5f, 60.0f, 0.0f);
+    tracker.acquire(CarrierTracker::estimate(first.data(), 400), 400);
+    for (size_t n = 0; n < 800; n++) {
+        tracker.track(first[2 * n], first[2 * n + 1]);
+    }
+    ASSERT_GT(tracker.lock(), 0.95);
+
+    // the carrier moves and the level changes, as it would after a fade
+    const vector<float> second = make_am(800, 0.2f, -110.0f, 1.0f);
+    tracker.acquire(CarrierTracker::estimate(second.data(), 400), 400);
+
+    EXPECT_NEAR(hz_of(tracker.dphi()), -110.0, 1.0);
+    for (size_t n = 0; n < 800; n++) {
+        EXPECT_NEAR(tracker.track(second[2 * n], second[2 * n + 1]), 0.2, 0.01) << "at sample " << n;
+    }
+    EXPECT_NEAR(tracker.amplitude(), 0.2, 0.01);
+}
