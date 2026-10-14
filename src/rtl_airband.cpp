@@ -548,8 +548,24 @@ void* demodulate(void* params) {
 
                     fparms->squelch.process_raw_sample(channel->wavein[j]);
 
+                    // Coherent AM counter-rotates every sample, not only the ones squelch has
+                    // decided to filter.  The carrier is estimated over a transmission's opening
+                    // samples, and those are below the squelch level by definition - they are what
+                    // squelch_lookback exists to recover - so gating the de-rotation on squelch
+                    // would leave exactly that window un-rotated.  It also keeps dm_phi advancing
+                    // sample by sample, which the estimate needs: a phase that stalls between
+                    // transmissions is not a carrier that can be measured.
+                    const bool coherent = (fparms->am_detector == AM_COHERENT && fparms->modulation == MOD_AM);
+                    const bool filtering = fparms->squelch.should_filter_sample() && channel->needs_raw_iq;
+
+                    // The sample coherent demodulation works on: counter-rotated, taken before the
+                    // bandwidth filter so that what the carrier tracker sees does not change
+                    // character at the moment squelch starts filtering.
+                    float coherent_re = 0.0f;
+                    float coherent_im = 0.0f;
+
                     // If squelch is open / opening and using I/Q, then cleanup the signal and possibly update squelch.
-                    if (fparms->squelch.should_filter_sample() && channel->needs_raw_iq) {
+                    if (filtering || coherent) {
                         // remove phase rotation introduced by FFT sliding window
                         float swf, cwf, re_tmp, im_tmp;
                         sincosf_lut(channel->dm_phi, &swf, &cwf);
@@ -557,17 +573,22 @@ void* demodulate(void* params) {
                         channel->dm_phi += channel->dm_dphi;
                         channel->dm_phi &= 0xffffff;
 
-                        // apply lowpass filter, will be a no-op if not configured
-                        fparms->lowpass_filter.apply(re_tmp, im_tmp);
+                        coherent_re = re_tmp;
+                        coherent_im = im_tmp;
 
-                        // update I/Q and wave
-                        real = re_tmp;
-                        imag = im_tmp;
-                        channel->wavein[j] = sqrt(real * real + imag * imag);
+                        if (filtering) {
+                            // apply lowpass filter, will be a no-op if not configured
+                            fparms->lowpass_filter.apply(re_tmp, im_tmp);
 
-                        // update squelch post-cleanup
-                        if (fparms->lowpass_filter.enabled()) {
-                            fparms->squelch.process_filtered_sample(channel->wavein[j]);
+                            // update I/Q and wave
+                            real = re_tmp;
+                            imag = im_tmp;
+                            channel->wavein[j] = sqrt(real * real + imag * imag);
+
+                            // update squelch post-cleanup
+                            if (fparms->lowpass_filter.enabled()) {
+                                fparms->squelch.process_filtered_sample(channel->wavein[j]);
+                            }
                         }
                     }
 
@@ -580,7 +601,7 @@ void* demodulate(void* params) {
                     // where the signal actually started.  Keyed off the squelch's own decision
                     // rather than the state machine's first_open_sample(), so that a squelch held
                     // closed by CTCSS does not release buffered audio.
-                    if (channel->lookback.push(channel->wavein[j], fparms->squelch.is_open())) {
+                    if (channel->lookback.push(channel->wavein[j], coherent_re, coherent_im, fparms->squelch.is_open())) {
                         channel->lookback.open_retroactively(AudioLookback::backfill_threshold(fparms->squelch.noise_level(), fparms->squelch.squelch_level()));
                     }
 
@@ -628,11 +649,42 @@ void* demodulate(void* params) {
                         // and settles to the noise before the gate closes.
                         const float& emitted = channel->lookback.delayed_envelope();
 
-                        fparms->dcavg = fparms->dcavg * 0.96875f + emitted * 0.03125f;
-                        waveout = (emitted - fparms->dcavg) / (fparms->agcavgfast * 1.5f);
-                        if (abs(waveout) > 0.8f) {
-                            waveout *= 0.85f;
-                            fparms->agcavgfast *= 1.15f;
+                        if (coherent) {
+                            // A transmission is starting and its opening samples are in the delay
+                            // line ahead of the one about to be emitted.  Measure the carrier over
+                            // them in one pass and start tracking from the emitted sample, so that
+                            // the first syllable is demodulated as well as the last - a loop
+                            // started cold here would still be pulling in across it.
+                            if (is_open && !was_open) {
+                                float carrier_window[2 * MS_TO_SAMPLES(CARRIER_ESTIMATE_MS)];
+                                const size_t taken = channel->lookback.copy_iq(channel->lookback.delay(), MS_TO_SAMPLES(CARRIER_ESTIMATE_MS), carrier_window);
+                                fparms->carrier.acquire(CarrierTracker::estimate(carrier_window, taken), taken);
+                            } else if (!is_open && was_open) {
+                                // Each transmission is acquired on its own; what the loop learned
+                                // about the last one is not evidence about the next.
+                                fparms->carrier.reset();
+                            }
+
+                            float emitted_re = 0.0f;
+                            float emitted_im = 0.0f;
+                            channel->lookback.delayed_iq(&emitted_re, &emitted_im);
+                            const float inphase = fparms->carrier.track(emitted_re, emitted_im);
+                            const float carrier_level = fparms->carrier.amplitude();
+
+                            // The carrier is the DC reference and the gain in one: what is left
+                            // after removing it is the modulation index, which is already
+                            // normalised.  No dcavg chasing the envelope and no one-sided AGC - the
+                            // level is measured rather than inferred, so it is right from the first
+                            // sample instead of after a time constant.  The 1.5 matches the
+                            // envelope path's headroom so the two are comparable by ear.
+                            waveout = carrier_level > 0.0f ? (inphase - carrier_level) / (carrier_level * 1.5f) : 0.0f;
+                        } else {
+                            fparms->dcavg = fparms->dcavg * 0.96875f + emitted * 0.03125f;
+                            waveout = (emitted - fparms->dcavg) / (fparms->agcavgfast * 1.5f);
+                            if (abs(waveout) > 0.8f) {
+                                waveout *= 0.85f;
+                                fparms->agcavgfast *= 1.15f;
+                            }
                         }
                     }
 #ifdef NFM

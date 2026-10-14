@@ -104,6 +104,7 @@ def write_config(
             - freq_hz (int): Channel center frequency in Hz.
             - modulation (str|None): "am" or "nfm", omitted if None (binary default).
             - squelch (float): Squelch threshold (0 = disabled).
+            - am_detector (str|None): "envelope" or "coherent", omitted if None
             - squelch_lookback (int|None): Squelch lookback in ms, omitted if None
               (binary default).
             - ctcss (float|None): CTCSS tone Hz, omitted if None.
@@ -206,6 +207,8 @@ def write_config(
         if ch.get("squelch") is not None:
             lines.append(f"      squelch_snr_threshold = {ch['squelch']:.1f};")
 
+        if ch.get("am_detector") is not None:
+            lines.append(f'      am_detector = "{ch["am_detector"]}";')
         if ch.get("squelch_lookback") is not None:
             lines.append(f"      squelch_lookback = {int(ch['squelch_lookback'])};")
 

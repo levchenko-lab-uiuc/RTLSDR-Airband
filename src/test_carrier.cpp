@@ -403,3 +403,19 @@ TEST_F(CarrierTest, an_invalid_estimate_does_not_start_tracking) {
     EXPECT_FALSE(tracker.is_tracking());
     EXPECT_EQ(tracker.track(1.0, 1.0), 0.0);
 }
+
+TEST_F(CarrierTest, acquire_can_rewind_to_the_start_of_the_window) {
+    // The integration measures a window over a transmission's opening samples and then
+    // demodulates those same samples, so tracking has to begin at the window's start.
+    const vector<float> iq = make_am(800, 0.5f, 120.0f, 0.4f);
+
+    const CarrierEstimate est = CarrierTracker::estimate(iq.data(), 300);
+    ASSERT_TRUE(est.valid);
+    tracker.acquire(est, 300);
+
+    // sample 0, the first of the window, must already be in phase
+    EXPECT_NEAR(tracker.track(iq[0], iq[1]), 0.5, 0.02);
+    for (size_t n = 1; n < 800; n++) {
+        EXPECT_NEAR(tracker.track(iq[2 * n], iq[2 * n + 1]), 0.5, 0.02) << "at sample " << n;
+    }
+}

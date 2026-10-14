@@ -48,6 +48,7 @@
 #include "input-common.h"  // input_t
 #include "logging.h"
 #include "lookback.h"
+#include "carrier.h"
 #include "squelch.h"
 
 #define ALIGNED32 __attribute__((aligned(32)))
@@ -80,6 +81,15 @@
 // one transmission and the next.  Transitions in and out of a transmission are ramped over
 // SQUELCH_FADE_MS so that neither lands as a click.
 #define MAX_SQUELCH_LOOKBACK_MS 250
+
+// Coherent AM.  The carrier is measured over this much of a transmission's opening; long enough
+// that the frequency estimate is precise, short enough to sit inside any useful lookback.
+#define CARRIER_ESTIMATE_MS 30
+// The loop only has to follow oscillator drift and Doppler, both of which move over seconds
+#define CARRIER_LOOP_HZ 5.0f
+#define CARRIER_DAMPING 0.707f
+// Below the lowest audio frequency, so modulation averages out of the carrier level
+#define CARRIER_AMPLITUDE_HZ 20.0f
 #define SQUELCH_LOOKBACK_QUIET_MS 3
 #define SQUELCH_FADE_MS 5
 // The fade out is longer than the fade in, and starts SQUELCH_FADE_LEAD_MS before the carrier
@@ -218,6 +228,13 @@ struct freq_tag {
     struct timeval tv;
 };
 
+// How an AM channel recovers audio from the channel's complex samples.  AM_ENVELOPE rectifies,
+// which is what this has always done; AM_COHERENT tracks the carrier and counter-rotates by it.
+enum am_detectors {
+    AM_ENVELOPE,
+    AM_COHERENT,
+};
+
 enum modulations {
     MOD_AM
 #ifdef NFM
@@ -270,6 +287,8 @@ struct freq_t {
     NotchFilter notch_filter;      // notch filter - good to remove CTCSS tones
     LowpassFilter lowpass_filter;  // lowpass filter, applied to I/Q after derotation, set at bandwidth/2 to remove out of band noise
     enum modulations modulation;
+    enum am_detectors am_detector;
+    CarrierTracker carrier;  // coherent AM only; idle and silent when am_detector is AM_ENVELOPE
 };
 struct channel_t {
     float wavein[WAVE_LEN];      // FFT output waveform

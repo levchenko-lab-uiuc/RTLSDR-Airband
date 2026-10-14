@@ -182,11 +182,11 @@ CarrierEstimate CarrierTracker::estimate(const float* iq, const size_t& count) {
     return result;
 }
 
-void CarrierTracker::acquire(const CarrierEstimate& estimate) {
+void CarrierTracker::acquire(const CarrierEstimate& estimate, const size_t& rewind_samples) {
     if (!configured_ || !estimate.valid) {
         return;
     }
-    phase_ = estimate.phase;
+    phase_ = wrap_phase(estimate.phase - estimate.dphi * (float)rewind_samples);
     dphi_ = estimate.dphi;
     amplitude_ = estimate.amplitude;
     lock_ = 1.0f;

@@ -280,6 +280,7 @@ static struct freq_t* mk_freqlist(int n) {
         fl[i].lookback_samples = AGC_EXTRA;
         fl[i].active_counter = 0;
         fl[i].modulation = MOD_AM;
+        fl[i].am_detector = AM_ENVELOPE;
     }
     return fl;
 }
@@ -310,6 +311,25 @@ static int parse_anynum2int(libconfig::Setting& f) {
 // squelch_lookback is configured in milliseconds.  The delay line always holds at least the
 // AGC_EXTRA samples that the AGC has run ahead of the audio by since long before it existed, so a
 // lookback of zero leaves the timing of the audio path as it has always been.
+// am_detector selects how AM recovers audio.  Defaults to the envelope detector this has always
+// used, so an existing config sounds exactly as it did.
+static enum am_detectors parse_am_detector(const libconfig::Setting& setting, int devidx, int chanidx) {
+    if (setting.getType() != libconfig::Setting::TypeString) {
+        cerr << "Configuration error: devices.[" << devidx << "] channels.[" << chanidx << "]: am_detector must be a string or a list of strings\n";
+        error();
+    }
+    const string value = (const char*)setting;
+    if (value == "envelope") {
+        return AM_ENVELOPE;
+    }
+    if (value == "coherent") {
+        return AM_COHERENT;
+    }
+    cerr << "Configuration error: devices.[" << devidx << "] channels.[" << chanidx << "]: am_detector must be \"envelope\" or \"coherent\", not \"" << value << "\"\n";
+    error();
+    return AM_ENVELOPE;
+}
+
 static size_t parse_squelch_lookback(const libconfig::Setting& setting, int devidx, int chanidx) {
     if (libconfig::Setting::TypeInt != setting.getType()) {
         cerr << "Configuration error: devices.[" << devidx << "] channels.[" << chanidx << "]: squelch_lookback must be an int or a list of ints (in milliseconds)\n";
@@ -548,6 +568,23 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
                 }
             }
         }
+        if (chans[j].exists("am_detector")) {
+            if (libconfig::Setting::TypeList == chans[j]["am_detector"].getType()) {
+                if (chans[j]["am_detector"].getLength() < channel->freq_count) {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: am_detector should be a string or a list of strings with at least " << channel->freq_count
+                         << " elements\n";
+                    error();
+                }
+                for (int f = 0; f < channel->freq_count; f++) {
+                    channel->freqlist[f].am_detector = parse_am_detector(chans[j]["am_detector"][f], i, j);
+                }
+            } else {
+                const enum am_detectors detector = parse_am_detector(chans[j]["am_detector"], i, j);
+                for (int f = 0; f < channel->freq_count; f++) {
+                    channel->freqlist[f].am_detector = detector;
+                }
+            }
+        }
         if (chans[j].exists("notch")) {
             static const float default_q = 10.0;
 
@@ -749,6 +786,16 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
         for (int f = 0; f < channel->freq_count; f++) {
             // NFM is demodulated from the current I/Q sample rather than from the lookback delay
             // line, so it cannot be opened retroactively
+            if (channel->freqlist[f].modulation != MOD_AM && channel->freqlist[f].am_detector == AM_COHERENT) {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: am_detector is only supported for AM channels\n";
+                error();
+            }
+            if (channel->freqlist[f].am_detector == AM_COHERENT) {
+                // Coherent detection works on the channel's complex samples, so they have to be
+                // kept and down-mixed - which AM otherwise skips, because an envelope detector does
+                // not care what the residual frequency offset is and this one very much does.
+                channel->needs_raw_iq = 1;
+            }
             if (channel->freqlist[f].modulation != MOD_AM) {
                 if (channel->freqlist[f].lookback_samples > (size_t)AGC_EXTRA) {
                     cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: squelch_lookback is only supported for AM channels\n";
@@ -904,12 +951,18 @@ int parse_devices(libconfig::Setting& devs) {
         for (int j = 0; j < channel_count; j++) {
             channel_t* channel = dev->channels + j;
             size_t max_lookback = 0;
+            bool any_coherent = false;
             for (int f = 0; f < channel->freq_count; f++) {
                 if (channel->freqlist[f].lookback_samples > max_lookback) {
                     max_lookback = channel->freqlist[f].lookback_samples;
                 }
+                if (channel->freqlist[f].am_detector == AM_COHERENT) {
+                    any_coherent = true;
+                    channel->freqlist[f].carrier.configure(WAVE_RATE, CARRIER_LOOP_HZ, CARRIER_DAMPING, CARRIER_AMPLITUDE_HZ);
+                }
             }
-            channel->lookback.configure(max_lookback, AGC_EXTRA, MS_TO_SAMPLES(SQUELCH_LOOKBACK_QUIET_MS));
+            // The complex delay line is only worth its memory where something reads it
+            channel->lookback.configure(max_lookback, AGC_EXTRA, MS_TO_SAMPLES(SQUELCH_LOOKBACK_QUIET_MS), any_coherent);
             channel->lookback_freq_idx = -1;
         }
 

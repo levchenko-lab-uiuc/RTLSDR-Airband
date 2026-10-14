@@ -52,13 +52,19 @@
  cold at the same instant would still be pulling in across the first syllable, which is exactly
  the audio `squelch_lookback` exists to recover.
 
- The frequency comes from the argument of the lag-1 autocorrelation, sum of z[n] * conj(z[n-1]).
- Each term's argument is the phase advanced in one sample, and each is weighted by the magnitudes
+ The frequency comes from the argument of the autocorrelation, sum of z[n] * conj(z[n-lag]).
+ Each term's argument is the phase advanced over the lag, and each is weighted by the magnitudes
  of the two samples, so loud samples dominate and samples in the noise contribute little.
  Amplitude modulation does not bias it: it scales the terms without rotating them, as long as the
  modulation does not drive the envelope through zero.  Phase and amplitude then come from
  counter-rotating by that frequency and averaging, which leaves the carrier and averages the
  modulation away to the extent it is zero-mean over the window.
+
+ The lag is walked upwards rather than left at 1, because lag 1 is not accurate enough: its error
+ is around 1/sqrt(count * snr) radians per sample, and an error of even a few Hz spins the
+ counter-rotated window through whole cycles, so the average that yields phase and amplitude
+ cancels itself out.  A longer lag divides that error by its own length but only resolves the
+ phase advance modulo a turn, so each round unwraps using the estimate before it.
 
  track() is the slow half, and it is a second-order loop - which is to say the steady-state Kalman
  filter for a [phase, frequency] state with a linearised phase measurement.  Those are the same
@@ -102,7 +108,12 @@ class CarrierTracker {
     // Arm tracking from an estimate.  The next sample passed to track() is taken to be the one
     // the estimate's phase refers to, so a window measured over the lookback hands over seamlessly
     // to tracking the samples that follow it.
-    void acquire(const CarrierEstimate& estimate);
+    //
+    // rewind_samples winds the phase back by that many samples first.  The caller needs it when
+    // the window it measured *starts* at the sample about to be tracked rather than ending at it,
+    // which is the case when the estimate is made over a transmission's own opening samples and
+    // then those same samples are demodulated.
+    void acquire(const CarrierEstimate& estimate, const size_t& rewind_samples = 0);
     void reset(void);
 
     // One sample.  Returns the component in phase with the carrier, ie. amplitude * (1 + m) for
