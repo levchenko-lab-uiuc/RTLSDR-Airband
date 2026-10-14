@@ -73,7 +73,13 @@ class AudioLookback {
     // Allocate for up to max_delay samples of lookback.  agc_lead is how far ahead of the emitted
     // sample the AGC should track, quiet_run how many consecutive samples below the threshold count
     // as a gap between transmissions.  Both are capped to the delay in use.
-    void configure(const size_t& max_delay, const size_t& agc_lead, const size_t& quiet_run);
+    //
+    // store_iq additionally keeps the complex sample behind each envelope sample.  Coherent AM
+    // needs it: the carrier estimate is made over the start of a transmission, and by the time
+    // squelch has opened, that is sitting in here.  channel_t's own iq_in is both too short for a
+    // long lookback and shifted along every batch, so it cannot be read back that far.  Off by
+    // default because it doubles the delay line and envelope AM has no use for it.
+    void configure(const size_t& max_delay, const size_t& agc_lead, const size_t& quiet_run, const bool& store_iq = false);
 
     // Select the delay in use (<= max_delay) and drop all history.  Also used on its own, via
     // reset(), when the history stops being meaningful - after a scan mode retune the buffered
@@ -83,6 +89,7 @@ class AudioLookback {
 
     // Returns true when this sample is the one squelch opened on, ie. the moment to reach back
     bool push(const float& envelope, const bool& squelch_open);
+    bool push(const float& envelope, const float& re, const float& im, const bool& squelch_open);
     void open_retroactively(const float& threshold);
 
     const float& delayed_envelope(void) const;
@@ -95,7 +102,19 @@ class AudioLookback {
     // far ahead puts the fade out in front of the collapse.  lead is clamped to the delay.
     bool gate_at_lead(const size_t& lead) const;
 
+    // The complex sample behind delayed_envelope().  Zero when configure() was not asked to keep
+    // I/Q.  This is the sample coherent demodulation should be counter-rotating now.
+    void delayed_iq(float* re, float* im) const;
+
+    // Copy complex samples into dest as interleaved re/im, oldest first, starting at start_age and
+    // walking towards newer samples.  Returns how many were copied, which is fewer than count when
+    // the request runs past the newest sample or past what has been pushed.  This is how the
+    // carrier estimate gets a window over the onset: the sample being emitted is at age delay(),
+    // and the rest of the transmission is already behind it at lower ages.
+    size_t copy_iq(const size_t& start_age, const size_t& count, float* dest) const;
+
     bool is_configured(void) const;
+    bool stores_iq(void) const;
     const size_t& delay(void) const;
     const size_t& agc_lead(void) const;
     const size_t& backfill_count(void) const;
@@ -118,6 +137,7 @@ class AudioLookback {
     size_t sample_count_;    // samples pushed since the last reset, saturates at capacity_
     size_t backfill_count_;  // samples released retroactively, for logging and tests
     float* envelope_;
+    float* iq_;  // interleaved re/im, 2 per sample; NULL unless configure() was asked for it
     uint8_t* open_;
 };
 

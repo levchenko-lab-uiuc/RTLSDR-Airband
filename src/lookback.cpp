@@ -42,16 +42,19 @@ AudioLookback::AudioLookback(void) {
     sample_count_ = 0;
     backfill_count_ = 0;
     envelope_ = NULL;
+    iq_ = NULL;
     open_ = NULL;
 }
 
 AudioLookback::~AudioLookback(void) {
     free(envelope_);
+    free(iq_);
     free(open_);
 }
 
-void AudioLookback::configure(const size_t& max_delay, const size_t& agc_lead, const size_t& quiet_run) {
+void AudioLookback::configure(const size_t& max_delay, const size_t& agc_lead, const size_t& quiet_run, const bool& store_iq) {
     free(envelope_);
+    free(iq_);
     free(open_);
 
     max_delay_ = max_delay;
@@ -59,6 +62,7 @@ void AudioLookback::configure(const size_t& max_delay, const size_t& agc_lead, c
     quiet_run_cfg_ = quiet_run;
     capacity_ = max_delay_ + 1;
     envelope_ = (float*)calloc(capacity_, sizeof(float));
+    iq_ = store_iq ? (float*)calloc(2 * capacity_, sizeof(float)) : NULL;
     open_ = (uint8_t*)calloc(capacity_, sizeof(uint8_t));
     backfill_count_ = 0;
 
@@ -88,10 +92,44 @@ void AudioLookback::reset(void) {
         memset(envelope_, 0, capacity_ * sizeof(float));
         memset(open_, 0, capacity_ * sizeof(uint8_t));
     }
+    if (iq_ != NULL) {
+        memset(iq_, 0, 2 * capacity_ * sizeof(float));
+    }
 }
 
 bool AudioLookback::is_configured(void) const {
     return envelope_ != NULL;
+}
+
+bool AudioLookback::stores_iq(void) const {
+    return iq_ != NULL;
+}
+
+void AudioLookback::delayed_iq(float* re, float* im) const {
+    if (iq_ == NULL || sample_count_ <= delay_) {
+        *re = 0.0f;
+        *im = 0.0f;
+        return;
+    }
+    const size_t index = index_at_age(delay_);
+    *re = iq_[2 * index];
+    *im = iq_[2 * index + 1];
+}
+
+size_t AudioLookback::copy_iq(const size_t& start_age, const size_t& count, float* dest) const {
+    if (iq_ == NULL || dest == NULL || sample_count_ == 0 || start_age >= sample_count_) {
+        return 0;
+    }
+
+    // Walking from start_age towards newer samples means decreasing age, and age 0 is as new as
+    // it gets, so the run is bounded by start_age + 1 as well as by what was asked for.
+    const size_t available = std::min(start_age + 1, count);
+    for (size_t i = 0; i < available; i++) {
+        const size_t index = index_at_age(start_age - i);
+        dest[2 * i] = iq_[2 * index];
+        dest[2 * i + 1] = iq_[2 * index + 1];
+    }
+    return available;
 }
 
 const size_t& AudioLookback::delay(void) const {
@@ -111,6 +149,10 @@ size_t AudioLookback::index_at_age(const size_t& age) const {
 }
 
 bool AudioLookback::push(const float& envelope, const bool& squelch_open) {
+    return push(envelope, 0.0f, 0.0f, squelch_open);
+}
+
+bool AudioLookback::push(const float& envelope, const float& re, const float& im, const bool& squelch_open) {
     if (!is_configured()) {
         return false;
     }
@@ -120,6 +162,10 @@ bool AudioLookback::push(const float& envelope, const bool& squelch_open) {
     head_ = (head_ + 1) % capacity_;
     envelope_[head_] = envelope;
     open_[head_] = squelch_open ? 1 : 0;
+    if (iq_ != NULL) {
+        iq_[2 * head_] = re;
+        iq_[2 * head_ + 1] = im;
+    }
 
     if (sample_count_ < capacity_) {
         sample_count_++;

@@ -318,3 +318,115 @@ TEST_F(LookbackTest, backfill_threshold_sits_between_noise_and_squelch) {
     EXPECT_FLOAT_EQ(AudioLookback::backfill_threshold(0.0, 1.0), 0.0);
 }
 
+
+TEST_F(LookbackTest, iq_is_not_stored_unless_asked_for) {
+    AudioLookback lookback;
+    lookback.configure(50, 10, 5);
+
+    EXPECT_FALSE(lookback.stores_iq());
+
+    for (size_t i = 0; i < 100; i++) {
+        lookback.push(loud, 1.0, 2.0, true);
+    }
+
+    float re = 9.0;
+    float im = 9.0;
+    lookback.delayed_iq(&re, &im);
+    EXPECT_EQ(re, 0.0) << "envelope-only channels must not pay for a complex delay line";
+    EXPECT_EQ(im, 0.0);
+
+    float dest[20];
+    EXPECT_EQ(lookback.copy_iq(10, 5, dest), 0u);
+}
+
+TEST_F(LookbackTest, iq_comes_back_out_delayed_alongside_the_envelope) {
+    AudioLookback lookback;
+    lookback.configure(10, 4, 5, true);
+
+    EXPECT_TRUE(lookback.stores_iq());
+
+    for (size_t i = 0; i < 100; i++) {
+        lookback.push((float)i, (float)i, -(float)i, false);
+        if (i >= 10) {
+            float re = 0.0;
+            float im = 0.0;
+            lookback.delayed_iq(&re, &im);
+            EXPECT_FLOAT_EQ(re, (float)(i - 10));
+            EXPECT_FLOAT_EQ(im, -(float)(i - 10));
+            EXPECT_FLOAT_EQ(lookback.delayed_envelope(), (float)(i - 10)) << "and the envelope still lines up";
+        }
+    }
+}
+
+TEST_F(LookbackTest, copy_iq_reads_a_window_oldest_first) {
+    AudioLookback lookback;
+    lookback.configure(50, 10, 5, true);
+
+    for (size_t i = 0; i < 100; i++) {
+        lookback.push((float)i, (float)i, -(float)i, false);
+    }
+
+    // the newest sample pushed was 99, so age 10 is sample 89 and the window runs forwards from it
+    float dest[2 * 5];
+    ASSERT_EQ(lookback.copy_iq(10, 5, dest), 5u);
+    for (size_t i = 0; i < 5; i++) {
+        EXPECT_FLOAT_EQ(dest[2 * i], (float)(89 + i)) << "at offset " << i;
+        EXPECT_FLOAT_EQ(dest[2 * i + 1], -(float)(89 + i));
+    }
+}
+
+TEST_F(LookbackTest, copy_iq_stops_at_the_newest_sample) {
+    AudioLookback lookback;
+    lookback.configure(50, 10, 5, true);
+
+    for (size_t i = 0; i < 100; i++) {
+        lookback.push((float)i, (float)i, -(float)i, false);
+    }
+
+    // only 4 samples exist from age 3 forwards: ages 3, 2, 1, 0
+    float dest[2 * 20];
+    EXPECT_EQ(lookback.copy_iq(3, 20, dest), 4u);
+    EXPECT_FLOAT_EQ(dest[0], 96.0);
+    EXPECT_FLOAT_EQ(dest[2 * 3], 99.0);
+
+    // and nothing at all from beyond what has been pushed
+    EXPECT_EQ(lookback.copy_iq(500, 5, dest), 0u);
+    EXPECT_EQ(lookback.copy_iq(10, 5, NULL), 0u);
+}
+
+TEST_F(LookbackTest, copy_iq_wraps_around_the_ring) {
+    AudioLookback lookback;
+    lookback.configure(8, 2, 2, true);
+
+    // many more pushes than the ring holds, so the window being read straddles the wrap point
+    for (size_t i = 0; i < 1000; i++) {
+        lookback.push((float)i, (float)i, -(float)i, false);
+    }
+
+    float dest[2 * 9];
+    const size_t copied = lookback.copy_iq(8, 9, dest);
+    ASSERT_EQ(copied, 9u);
+    for (size_t i = 0; i < copied; i++) {
+        EXPECT_FLOAT_EQ(dest[2 * i], (float)(991 + i)) << "at offset " << i;
+    }
+}
+
+TEST_F(LookbackTest, reset_clears_stored_iq) {
+    AudioLookback lookback;
+    lookback.configure(50, 10, 5, true);
+
+    push_closed(lookback, 200, loud);
+    for (size_t i = 0; i < 200; i++) {
+        lookback.push(loud, 3.0, 4.0, false);
+    }
+    lookback.reset();
+
+    float dest[2 * 5];
+    EXPECT_EQ(lookback.copy_iq(10, 5, dest), 0u);
+
+    float re = 9.0;
+    float im = 9.0;
+    lookback.delayed_iq(&re, &im);
+    EXPECT_EQ(re, 0.0);
+    EXPECT_EQ(im, 0.0);
+}
