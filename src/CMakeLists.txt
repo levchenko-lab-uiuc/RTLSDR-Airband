@@ -284,6 +284,7 @@ add_library (rtl_airband_base OBJECT
 	rtl_airband.cpp
 	squelch.cpp
 	lookback.cpp
+	carrier.cpp
 	ctcss.cpp
 	util.cpp
 	udp_stream.cpp
@@ -355,6 +356,7 @@ if(BUILD_UNITTESTS)
 	list(APPEND TEST_FILES
 		squelch.cpp
 		lookback.cpp
+		carrier.cpp
 		logging.cpp
 		filters.cpp
 		ctcss.cpp
