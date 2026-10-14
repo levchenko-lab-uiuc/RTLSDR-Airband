@@ -324,6 +324,73 @@ down from where it started.
 the lead is clamped to that, which is why the measurements above use 125 ms. A station that
 wants the pop suppression has to set `squelch_lookback`.
 
+### Coherent AM Detection
+
+`am_detector` selects how an AM channel recovers audio. `"envelope"`, the default, rectifies:
+`sqrt(re*re + im*im)`, throwing the phase away. `"coherent"` keeps it — `CarrierTracker`
+(`src/carrier.cpp/h`) estimates the carrier, counter-rotates the sample by it, and takes what is
+left in phase with the carrier. AM only; a list in scan mode, the same shape as `squelch_lookback`.
+
+Two stages, split by timescale:
+
+- `estimate()` is feed-forward and one-shot, over the complex samples a transmission opens with —
+  which the `squelch_lookback` delay line is already holding when squelch opens. No loop, so no
+  acquisition transient: a loop started cold at that instant would still be pulling in across the
+  first syllable, which is the audio the lookback exists to recover.
+- `track()` is a second-order loop, which is the steady-state Kalman filter for a
+  `[phase, frequency]` state with a linearised phase measurement — the same filter, with loop
+  bandwidth and damping a reparameterisation of process and measurement noise. It follows drift
+  only (tuner error is static, Doppler moves over seconds), so it is narrow.
+
+The frequency comes from the autocorrelation at lags rising by four each round. **Lag 1 alone is
+not enough**: its error is about `1/sqrt(count * snr)` radians per sample — some 14 Hz at 6 dB over
+2000 samples at 8 kHz — and an error of a few Hz spins the counter-rotated window through whole
+cycles, so the average that yields phase and amplitude cancels itself out. The first implementation
+here did exactly that and returned an amplitude of 0.055 where the carrier was 0.5. A longer lag
+divides the error by its own length but resolves the phase advance only modulo a turn, so each
+round unwraps using the estimate before it.
+
+What it buys, in the order it matters:
+
+- The carrier amplitude is **observed, not inferred**. The audio is `(in-phase - carrier) / carrier`,
+  the modulation index: the carrier is the DC reference and the gain at once, both right from the
+  first sample rather than after a time constant. `dcavg` and the one-sided `agcavgfast` are not in
+  this path at all.
+- Carrier loss becomes visible the sample it happens, so silencing the end of a transmission needs
+  no lookahead into future squelch decisions. **Not yet used** — the gate and its fade are
+  unchanged, so an A/B differs in the demodulator and nothing else.
+- Below its threshold an envelope detector loses the signal to noise-noise cross terms.
+
+That last gain is **real but narrow**, and worth stating plainly so nobody expects more. Measured
+output SNR against an ideal envelope detector on identical samples
+(`CarrierTest.beats_envelope_detection_below_its_threshold`):
+
+| CNR | 18 dB | 9 dB | 3 dB | 0 dB | −3 dB | −6 dB |
+|---|---|---|---|---|---|---|
+| advantage | +0.02 dB | +0.14 dB | +0.78 dB | +1.67 dB | +3.04 dB | +4.86 dB |
+
+It does nothing for a strong local transmitter, and
+`CarrierTest.matches_envelope_detection_on_a_strong_signal` asserts that.
+
+Three things the integration needs, each a consequence of keeping the phase:
+
+- Coherent channels set `needs_raw_iq`, not for raw output but for the down-mixing that comes with
+  it. `config.cpp` otherwise skips it for AM on the grounds — true of an envelope detector, false
+  of this one — that a residual frequency offset does not matter.
+- The de-rotation runs on **every** sample for a coherent channel, not only those
+  `should_filter_sample()` admits. The carrier is estimated over a transmission's opening samples,
+  which sit below the squelch level by definition, so the old gating would leave exactly that window
+  un-rotated. It also keeps `dm_phi` advancing continuously; a phase that stalls between
+  transmissions is not a carrier that can be measured. The counter-rotated sample is taken *before*
+  the bandwidth filter, and nothing feeding the squelch is touched, so an envelope channel's path
+  through here is byte for byte what it was.
+- `AudioLookback` keeps complex samples for coherent channels. `channel_t::iq_in` cannot serve: it
+  holds `2 * WAVE_BATCH + AGC_EXTRA` samples and is shifted by a whole batch each round, so with any
+  real lookback the onset has already left it.
+
+Counter-rotating does not change `|z|`, so the squelch sees identical magnitudes either way and the
+two detectors open and close together — which is what makes a sample-for-sample A/B meaningful.
+
 ### Device Modes
 
 Each device operates in one of two modes, set via `mode = "multichannel"` (default) or `mode = "scan"` in config.
