@@ -123,7 +123,7 @@ void* controller_thread(void* params) {
                 i++;
                 i %= dev->channels[0].freq_count;
                 dev->channels[0].freq_idx = i;
-                new_centerfreq = dev->channels[0].freqlist[i].frequency + 20 * (double)(dev->input->sample_rate / fft_size);
+                new_centerfreq = dev->channels[0].freqlist[i].frequency + 20 * fft_bin_width(dev->input->sample_rate, fft_size);
                 if (input_set_centerfreq(dev->input, new_centerfreq) < 0) {
                     break;
                 }
@@ -529,6 +529,19 @@ void* demodulate(void* params) {
                 // set to NO_SIGNAL, will be updated to SIGNAL based on squelch below
                 channel->axcindicate = NO_SIGNAL;
 
+                // The lookback delay line holds audio for one frequency at a time.  In scan mode a
+                // retune makes everything in it belong to the previous frequency, so it is dropped
+                // and re-armed with the new frequency's delay.
+                if (channel->lookback_freq_idx != channel->freq_idx) {
+                    channel->lookback_freq_idx = channel->freq_idx;
+                    channel->lookback.set_delay(fparms->lookback_samples);
+                    channel->fade = 0.0f;
+                }
+
+                const size_t attack_samples = MS_TO_SAMPLES(SQUELCH_FADE_MS);
+                const size_t release_samples = MS_TO_SAMPLES(SQUELCH_FADE_OUT_MS);
+                const size_t fade_lead = MS_TO_SAMPLES(SQUELCH_FADE_LEAD_MS);
+
                 for (int j = AGC_EXTRA; j < WAVE_BATCH + AGC_EXTRA; j++) {
                     float& real = channel->iq_in[2 * (j - AGC_EXTRA)];
                     float& imag = channel->iq_in[2 * (j - AGC_EXTRA) + 1];
@@ -558,70 +571,148 @@ void* demodulate(void* params) {
                         }
                     }
 
-                    if (fparms->modulation == MOD_AM) {
-                        // if squelch is just opening then bootstrip agcavgfast with prior values of wavein
-                        if (fparms->squelch.first_open_sample()) {
-                            for (int k = j - AGC_EXTRA; k < j; k++) {
-                                if (channel->wavein[k] >= fparms->squelch.squelch_level()) {
-                                    fparms->agcavgfast = fparms->agcavgfast * 0.9f + channel->wavein[k] * 0.1f;
-                                }
-                            }
-                        }
-                        // if squelch is just closing then fade out the prior samples of waveout
-                        else if (fparms->squelch.last_open_sample()) {
-                            for (int k = j - AGC_EXTRA + 1; k < j; k++) {
-                                channel->waveout[k] = channel->waveout[k - 1] * 0.94f;
-                            }
-                        }
+                    // The gate of the sample emitted last time round, which can no longer change.
+                    // Read before the push, since the push moves the delay line along by one.
+                    const bool was_open = channel->lookback.gate();
+
+                    // Squelch has decided a transmission is under way, but the samples it took to
+                    // reach that decision are still in the delay line - open them too, back to
+                    // where the signal actually started.  Keyed off the squelch's own decision
+                    // rather than the state machine's first_open_sample(), so that a squelch held
+                    // closed by CTCSS does not release buffered audio.
+                    if (channel->lookback.push(channel->wavein[j], fparms->squelch.is_open())) {
+                        channel->lookback.open_retroactively(AudioLookback::backfill_threshold(fparms->squelch.noise_level(), fparms->squelch.squelch_level()));
                     }
+
+                    const bool is_open = channel->lookback.gate();
 
                     float& waveout = channel->waveout[j];
 
-                    // If squelch sees power then do modulation-specific processing
-                    if (fparms->squelch.should_process_audio()) {
-                        if (fparms->modulation == MOD_AM) {
-                            if (channel->wavein[j] > fparms->squelch.squelch_level()) {
-                                fparms->agcavgfast = fparms->agcavgfast * 0.995f + channel->wavein[j] * 0.005f;
-                            }
+                    if (fparms->modulation == MOD_AM) {
+                        // AM runs off the far end of the delay line, so that a sample is already
+                        // demodulated by the time squelch may still reach back and release it.  The
+                        // AGC follows a slightly newer sample - it has always led the audio by
+                        // AGC_EXTRA samples so that the gain is settled by the time one is emitted -
+                        // and only follows samples above the squelch level, so that it holds its
+                        // value through the noise between transmissions instead of tracking it.
+                        const float& agc_sample = channel->lookback.agc_envelope();
+                        if (agc_sample > fparms->squelch.squelch_level()) {
+                            fparms->agcavgfast = fparms->agcavgfast * 0.995f + agc_sample * 0.005f;
+                        }
 
-                            waveout = (channel->wavein[j - AGC_EXTRA] - fparms->agcavgfast) / (fparms->agcavgfast * 1.5f);
-                            if (abs(waveout) > 0.8f) {
-                                waveout *= 0.85f;
-                                fparms->agcavgfast *= 1.15f;
+                        // Audio starting: charge the AGC from the samples leading the first one to
+                        // be emitted, so that a retroactively released onset is not mis-levelled
+                        if (is_open && !was_open) {
+                            for (size_t age = channel->lookback.delay(); age > channel->lookback.delay() - channel->lookback.agc_lead(); age--) {
+                                const float& sample = channel->lookback.envelope_at_age(age);
+                                if (sample >= fparms->squelch.squelch_level()) {
+                                    fparms->agcavgfast = fparms->agcavgfast * 0.9f + sample * 0.1f;
+                                    // dcavg is charged from the same samples, which lead the one
+                                    // being emitted.  That looks wrong and is not: the onset is a
+                                    // rising edge, so putting the reference where the envelope is
+                                    // about to be anticipates the rise.  Setting it to the emitted
+                                    // sample instead was tried and is three times worse, because
+                                    // the reference then lags the whole way up.
+                                    fparms->dcavg = fparms->dcavg * 0.9f + sample * 0.1f;
+                                }
                             }
                         }
+
+                        // agcavgfast sets the gain, but it tracks only upwards so that it holds
+                        // the transmission's level through the noise between transmissions.  Using
+                        // it as the DC reference as well is what put the click at the end of a
+                        // transmission: the squelch keeps the gate open for its close delay after
+                        // the carrier has gone, and a held reference turns that window into a DC
+                        // block.  dcavg is a plain DC blocker instead - it follows the envelope
+                        // both ways over about 4 ms, a corner near 40 Hz, so it leaves speech alone
+                        // and settles to the noise before the gate closes.
+                        const float& emitted = channel->lookback.delayed_envelope();
+
+                        fparms->dcavg = fparms->dcavg * 0.96875f + emitted * 0.03125f;
+                        waveout = (emitted - fparms->dcavg) / (fparms->agcavgfast * 1.5f);
+                        if (abs(waveout) > 0.8f) {
+                            waveout *= 0.85f;
+                            fparms->agcavgfast *= 1.15f;
+                        }
+                    }
 #ifdef NFM
-                        else if (fparms->modulation == MOD_NFM) {
-                            // FM demod
-                            if (fm_demod == FM_FAST_ATAN2) {
-                                waveout = polar_disc_fast(real, imag, channel->pr, channel->pj);
-                            } else if (fm_demod == FM_QUADRI_DEMOD) {
-                                waveout = fm_quadri_demod(real, imag, channel->pr, channel->pj);
-                            }
-                            channel->pr = real;
-                            channel->pj = imag;
-
-                            // de-emphasis IIR + DC blocking
-                            fparms->agcavgfast = fparms->agcavgfast * 0.995f + waveout * 0.005f;
-                            waveout -= fparms->agcavgfast;
-                            waveout = waveout * (1.0f - channel->alpha) + channel->prev_waveout * channel->alpha;
-
-                            // save off waveout before notch and ampfactor
-                            channel->prev_waveout = waveout;
+                    // NFM is demodulated from the current I/Q sample rather than from the delay
+                    // line, so it runs only while squelch sees power, as it always has.  Lookback
+                    // is rejected for NFM channels at config time.
+                    else if (fparms->modulation == MOD_NFM && fparms->squelch.should_process_audio()) {
+                        // FM demod
+                        if (fm_demod == FM_FAST_ATAN2) {
+                            waveout = polar_disc_fast(real, imag, channel->pr, channel->pj);
+                        } else if (fm_demod == FM_QUADRI_DEMOD) {
+                            waveout = fm_quadri_demod(real, imag, channel->pr, channel->pj);
                         }
+                        channel->pr = real;
+                        channel->pj = imag;
+
+                        // de-emphasis IIR + DC blocking
+                        fparms->agcavgfast = fparms->agcavgfast * 0.995f + waveout * 0.005f;
+                        waveout -= fparms->agcavgfast;
+                        waveout = waveout * (1.0f - channel->alpha) + channel->prev_waveout * channel->alpha;
+
+                        // save off waveout before notch and ampfactor
+                        channel->prev_waveout = waveout;
+                    }
 #endif /* NFM */
 
-                        // process audio sample for CTCSS, will be no-op if not configured
+                    // process audio sample for CTCSS, will be no-op if not configured
+                    if (fparms->squelch.should_process_audio()) {
                         fparms->squelch.process_audio_sample(waveout);
                     }
 
-                    // If squelch is still open then save samples to output
-                    if (fparms->squelch.is_open()) {
+                    // Ramp in and out of a transmission rather than switching the audio on and off,
+                    // which would be audible as a click - especially at the start, where a
+                    // retroactive open can un-mute part way up the rising edge of the signal.
+                    //
+                    // The squelch keeps the gate open for its close delay after the carrier has
+                    // gone.  AM has nothing to demodulate in that window - the AGC still holds the
+                    // transmission's level, so (envelope - agcavgfast) sits far below zero - and
+                    // emitting it flat and then cutting is what the end-of-transmission click was.
+                    // Releasing on the emitted sample's own level instead walks it down to silence
+                    // across that delay.  The release is far longer than the attack so that a
+                    // modulation trough barely moves it, and the attack stays short so a
+                    // retroactively recovered onset is not softened.
+                    // Fading out at the gate is far too late: once the DC is dealt with, what is
+                    // left to hear is the carrier itself stopping, and dcavg needs its own time
+                    // constant to absorb that step.  The squelch cannot warn of it either - its
+                    // moving averages only reach CLOSING some milliseconds after the fact.  The
+                    // delay line can: the envelope a few milliseconds *after* the sample being
+                    // emitted is already in it, so the fade is at the floor before the step
+                    // arrives.  An ordinary modulation trough crosses the squelch level too, but
+                    // only for a sample or two - measured on an off-air capture, 0.12 ms at
+                    // the median - which against this release barely moves the ramp.
+                    //
+                    // Silence, not an attenuation: the point is that the step never reaches the
+                    // output at all.  Ducking to a floor instead was tried and is worse on both
+                    // counts - it leaves the ringing audible under the duck, and the residue it
+                    // does let through is louder.
+                    // Keyed off the gate a good way ahead rather than off the envelope: the
+                    // envelope crosses the squelch level only once the collapse is well under
+                    // way, which on a strong signal is long after the transient has been emitted,
+                    // and testing it against the transmission's own level instead would fire on
+                    // every modulation trough.  The gate is clean and shuts a fixed close delay
+                    // after the carrier went, so looking that far ahead gets in front of it.
+                    const bool carrier = is_open && channel->lookback.gate_at_lead(fade_lead);
+                    channel->fade = next_fade_level(channel->fade, carrier ? 1.0f : 0.0f, attack_samples, release_samples);
+                    // Shaped rather than linear.  A straight ramp still has a corner at each
+                    // end, and a corner is a click of its own; a raised cosine leaves the slope
+                    // continuous.  Skipped at the rails, which is almost every sample.
+                    float fade = channel->fade;
+                    if (fade > 0.0f && fade < 1.0f) {
+                        fade = 0.5f - 0.5f * cosf((float)M_PI * fade);
+                    }
+
+                    // If squelch is open then save samples to output
+                    if (fade > 0.0f) {
                         // apply the notch filter, will be a no-op if not configured
                         fparms->notch_filter.apply(waveout);
 
                         // apply the ampfactor
-                        waveout *= fparms->ampfactor;
+                        waveout *= fparms->ampfactor * fade;
 
                         // make sure the value is between +/- 1 (requirement for libmp3lame)
                         if (isnan(waveout)) {

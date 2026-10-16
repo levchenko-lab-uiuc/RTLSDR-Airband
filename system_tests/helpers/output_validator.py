@@ -18,6 +18,29 @@ from mutagen.mp3 import MP3
 _MP3_SAMPLE_RATE = 8000
 
 
+def mp3_duration(
+    mp3_dir: Path,
+    filename_template: str,
+) -> float:
+    """
+    Return the total duration in seconds of the MP3 output(s) matching a template.
+
+    Use this when a test compares two runs against each other rather than
+    against a fixed expected duration. Durations are summed across matches, as
+    validate_mp3() does, so an hour-boundary split does not change the total.
+    """
+    matches = list(mp3_dir.glob(f"{filename_template}_[0-9]*.mp3"))
+    assert (
+        matches
+    ), f"No .mp3 output file found matching '{filename_template}_[0-9]*.mp3' in {mp3_dir}"
+
+    total_s = 0.0
+    for mp3_file in matches:
+        assert mp3_file.stat().st_size > 0, f"MP3 file is empty: {mp3_file.name}"
+        total_s += MP3(mp3_file).info.length
+    return total_s
+
+
 def validate_mp3(
     mp3_dir: Path,
     filename_template: str,

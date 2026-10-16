@@ -47,6 +47,7 @@
 #include "filters.h"
 #include "input-common.h"  // input_t
 #include "logging.h"
+#include "lookback.h"
 #include "squelch.h"
 
 #define ALIGNED32 __attribute__((aligned(32)))
@@ -73,6 +74,21 @@
 #define WAVE_BATCH WAVE_RATE / 8
 #define AGC_EXTRA 100
 #define WAVE_LEN 2 * WAVE_BATCH + AGC_EXTRA
+
+// How far back squelch may reach to recover the start of a transmission it opened late, and the
+// audio delay that buys it.  A quiet stretch this long ends a backfill, ie. marks the gap between
+// one transmission and the next.  Transitions in and out of a transmission are ramped over
+// SQUELCH_FADE_MS so that neither lands as a click.
+#define MAX_SQUELCH_LOOKBACK_MS 250
+#define SQUELCH_LOOKBACK_QUIET_MS 3
+#define SQUELCH_FADE_MS 5
+// The fade out is longer than the fade in, and starts SQUELCH_FADE_LEAD_MS before the carrier
+// actually stops - the delay line already knows it is about to.  Between them they put the
+// audio at silence by the moment the carrier goes, which is where the AM detector's transient
+// lands.  The fade in stays short so a retroactively recovered onset is not softened.
+#define SQUELCH_FADE_OUT_MS 8
+#define SQUELCH_FADE_LEAD_MS 40
+#define MS_TO_SAMPLES(ms) ((size_t)(WAVE_RATE) * (size_t)(ms) / 1000)
 #define MP3_RATE 8000
 #define MAX_SHOUT_QUEUELEN 32768
 #define TAG_QUEUE_LEN 16
@@ -246,8 +262,10 @@ struct freq_t {
     int frequency;     // scan frequency
     char* label;       // frequency label
     float agcavgfast;  // average power, for AGC
+    float dcavg;       // DC blocker for the AM envelope, ~40 Hz corner
     float ampfactor;   // multiplier to increase / decrease volume
     Squelch squelch;
+    size_t lookback_samples;       // audio delay in samples, ie. how far back squelch may reach to open retroactively
     size_t active_counter;         // count of loops where channel has signal
     NotchFilter notch_filter;      // notch filter - good to remove CTCSS tones
     LowpassFilter lowpass_filter;  // lowpass filter, applied to I/Q after derotation, set at bandwidth/2 to remove out of band noise
@@ -266,6 +284,9 @@ struct channel_t {
     float alpha;
 #endif                         /* NFM */
     uint32_t dm_dphi, dm_phi;  // derotation frequency and current phase value
+    AudioLookback lookback;    // delayed envelope and squelch decisions, lets squelch open retroactively
+    int lookback_freq_idx;     // freq_idx the lookback delay line currently holds audio for
+    float fade;                // audio gate ramp position, 0 (silent) to 1 (full)
     enum mix_modes mode;       // mono or stereo
     status axcindicate;
     unsigned char afc;  // 0 - AFC disabled; 1 - minimal AFC; 2 - more aggressive AFC and so on to 255
@@ -318,6 +339,8 @@ struct mixer_t {
     const char* name;
     bool enabled;
     int interval;
+    bool lookback_seen;       // whether lookback_samples has been set by a connected channel
+    size_t lookback_samples;  // audio delay of the channels feeding this mixer, to warn if they disagree
     size_t output_overrun_count;
     int input_count;
     mixinput_t* inputs;

@@ -198,6 +198,24 @@ uv run isort system_tests/
 uv run pylint system_tests/conftest.py system_tests/helpers/ system_tests/tests/
 ```
 
+Note that `squelch_lookback` is emitted by `helpers/config_writer.py` but is not yet
+part of the `user_provided` JSON schema (`UserChannelCase` in `conftest.py`), so
+user-supplied test cases cannot set it.
+
+### Measuring When Audio Was Released
+
+MP3 duration cannot answer *when* a transmission was released: it resolves 72 ms frames, the
+encoder is fed whole 125 ms blocks, and it also moves with whatever the audio path does at the
+end of a transmission. `helpers/udp_capture.py` takes a channel's `udp_stream` output with
+`continuous = true` — raw float32 of `channel->waveout`, audio where the squelch is open and
+exact zeros where it is closed — and locates the first released sample exactly.
+`config_writer.write_config()` emits that output from a channel's `udp_output` key, and the
+capture binds an ephemeral port because the suite runs the binaries in parallel.
+
+`test_squelch_lookback` uses it. The earlier duration-based version was measuring the wrong
+thing: it reported ~145 ms of recovery where the real figure is ~12 ms, because an MP3 that
+starts one 125 ms block earlier is one block longer whatever the backfill actually did.
+
 ## Architecture
 
 ### Reception Pipeline
@@ -223,7 +241,102 @@ SDR device (input-*.cpp)
 | `src/input-common.cpp/h` | Input device abstraction (`input_t` function-pointer interface) |
 | `src/filters.cpp/h` | IIR lowpass and notch filters |
 | `src/squelch.cpp/h` | Noise-power-based voice activity detection |
+| `src/lookback.cpp/h` | Audio delay line that lets squelch open retroactively (`squelch_lookback`) |
 | `src/ctcss.cpp/h` | CTCSS tone detection |
+| `src/helper_functions.cpp/h` | Path/time helpers, config value coercion, FFT bin placement |
+
+### FFT Bin Placement
+
+`fft_bin_for()` (`src/helper_functions.cpp`) maps a channel frequency to the FFT bin the
+demod reads, and `fft_bin_width()` gives the bin width in Hz. Both matter more than they
+look:
+
+- The width is `sample_rate / fft_size` in **floating point**. `fft_size` does not divide
+  every sample rate evenly — 10 Msps over 2048 bins is 4882.8125 Hz, not 4882 — and
+  truncating the remainder drifts by a whole bin for channels far from the centre.
+- The bin is the **nearest** one, not the one below. The channel sits wherever it sits
+  between two bin centres and the nearer one carries its energy; truncating downwards put
+  every channel up to a full bin low, averaging half a bin. Measured on an off-air
+  capture, 128.750 MHz (0.88 of the way between bins) reads 1.3 dB stronger in the
+  rounded bin than in the one below.
+
+Scan mode tunes 20 bins above the channel to keep it off the DC spike (`config.cpp:446`,
+`rtl_airband.cpp:126`), so the channel has to land exactly `fft_size - 20`. That offset is
+an exact integer number of bins by construction, which is where a truncating formula is
+most obviously wrong — it lands a bin low however the rate and size divide.
+
+### AM DC Blocking
+
+`agcavgfast` sets the AM gain and tracks only upwards, so that it holds the transmission's
+level through the noise between transmissions rather than chasing it. Using it as the DC
+reference as well put a click at the end of every transmission: the squelch keeps the gate
+open for its close delay (197 samples, 24.6 ms) after the carrier has gone, and a held
+reference turns `(envelope - agcavgfast)` into a DC block for that whole window. Measured on
+an off-air capture, 161 of 165 transmissions ended in a sustained negative DC of
+−0.42 to −0.52 lasting a median 14.6 ms, against a `SQUELCH_FADE_MS` ramp of only 2 ms.
+
+`dcavg` (`freq_params_t`) is a separate DC blocker: it follows the envelope **both ways**
+over about 4 ms, a corner near 40 Hz, so it leaves speech alone and settles to the noise
+before the gate closes. It is charged on open from the same lookback samples as
+`agcavgfast`, because otherwise it sits on the inter-transmission noise and puts the same
+step at the *start* that it removes from the end.
+
+The gain must not be made to track downwards instead: it is the divisor as well, so
+following it down raises the gain on what is left and drove peak `waveout` to 1.0 (clipping)
+when tried.
+
+### Silencing the Carrier Drop
+
+The DC blocker removes the gross step but rings on it: the envelope collapses at once, `dcavg`
+needs its time constant to follow, and the difference is a step with an exponential tail — a
+pop, about −0.13 decaying over 10 ms, audible at the end of most transmissions.
+
+The audio runs behind the squelch, so the delay line already holds what the signal does *after*
+the sample being emitted. `AudioLookback::gate_at_lead()` reads the squelch decision
+`SQUELCH_FADE_LEAD_MS` (40 ms) ahead and the gate ramps to silence over `SQUELCH_FADE_OUT_MS`
+(8 ms), so the audio is already shut when the collapse arrives and the step never reaches the
+output. The ramp is raised-cosine rather than linear (`next_fade_level()` returns the position;
+`rtl_airband.cpp` shapes it), because a straight ramp still has a corner at each end and a
+corner is a click of its own. `SQUELCH_FADE_MS` (5 ms) is the fade in, kept short so a
+retroactively recovered onset is not softened.
+
+Four things were tried and rejected, all measured on the same off-air capture:
+
+- **Keying the fade off `Squelch`'s own state.** It only reaches `CLOSING` once its moving
+  averages notice, which is after the fact — traced on one transmission the envelope was still
+  20 dB over the noise floor when the pop had already happened, collapsing 2 ms later.
+- **Keying it off the envelope at the lead.** The envelope crosses the squelch level only once
+  the collapse is well under way, which on a strong signal is after the transient; testing it
+  against the transmission's own level instead fires on every modulation trough. The gate is
+  clean and shuts a fixed close delay after the carrier went, so it is the dependable warning.
+- **Ducking to a floor rather than silencing.** Worse both ways: the ringing stays audible under
+  the duck, and the residue it lets through is louder.
+- **Latching a DC-blocker reset at the collapse** — preset the filter state rather than let it
+  ring, the standard answer to a DC-removal filter ringing on a step. It cut the median but left
+  *louder* leftovers (fragments peaking at 0.170 against 0.036 without it) and needed two extra
+  pieces of state to stop it firing on modulation troughs and on recovered onsets.
+
+Note that `dcavg` is charged on open from the samples *leading* the one being emitted, the same
+ones the AGC uses. That looks wrong and is not: the onset is a rising edge, so putting the
+reference where the envelope is about to be anticipates the rise. Setting it to the emitted
+sample instead was tried and is three times worse, because the reference then lags the whole
+way up.
+
+Peak of a 10 ms moving average, the audible thump:
+
+| | at close | at open | mid-speech | audio released |
+|---|---|---|---|---|
+| before any of this | 0.550 | 0.046 | 0.034 | 1073.9 s |
+| `dcavg` DC blocker alone | 0.198 | 0.029 | 0.020 | 1073.9 s |
+| + silence keyed off the gate | **0.019** | **0.026** | 0.020 | 1068.0 s |
+
+The close transient ends up at the level of ordinary speech content in the same measure, 30x
+down from where it started.
+
+**The fade lead is clamped to the delay line**, so it is only fully available when
+`squelch_lookback` is set. At the default of 0 the delay is `AGC_EXTRA` (12.5 ms at 8 kHz) and
+the lead is clamped to that, which is why the measurements above use 125 ms. A station that
+wants the pop suppression has to set `squelch_lookback`.
 
 ### Device Modes
 
@@ -247,10 +360,23 @@ Config files use libconfig++ syntax. Sample configs in `config/`. Top-level sect
 
 ```
 devices: ( { type = "rtlsdr"; centerfreq = 120.0; gain = 25;
-             channels: ( { freq = 119.5; modulation = "AM";
+             channels: ( { freq = 119.5; modulation = "am";
                            outputs: ( { type = "icecast"; ... } ); } ); } );
 mixers: { mix1: { outputs: ( { type = "icecast"; ... } ); } };
 ```
+
+### Squelch Lookback
+
+Squelch cannot tell a transmission has started until the level has risen above the threshold and survived the open delay, so the first fraction of a second is cut off. `AudioLookback` (`src/lookback.cpp/h`) runs the AM audio path a fixed number of samples behind the squelch, keeping ring buffers of the signal envelope and of the squelch decision for each sample. When squelch opens, `open_retroactively()` walks back through the stored envelope to where the signal actually started — the most recent 3 ms window whose **mean** is below the geometric mean of the noise floor and the squelch level — and marks those not-yet-emitted samples open, so the transmission is released from its true start. Reaching back only as far as the signal extends, rather than a fixed pre-roll, keeps a long delay from prepending noise to every transmission.
+
+The stopping test is on the window's mean, not on every sample in it. An AM envelope fluctuates several dB from sample to sample, so a window in which *every* sample falls below the threshold is uncommon even in pure noise: measured on an off-air capture, one occurs roughly every 270 ms at the threshold this is called with. The original implementation required one, which meant the walk-back usually found no stopping point in the noise ahead of a transmission and ran until the delay line was exhausted — turning the budget into exactly the fixed pre-roll it is meant not to be. On real traffic that released a burst of noise ahead of 26 of 43 transmissions, and because the AGC still holds the previous transmission's level between transmissions, AM demodulated that burst into a near full-scale DC step louder than the speech it was supposed to recover. Testing the mean fixed it: noise released per transmission went from a median of 13.5 ms to 0.0 ms, and peak `waveout` on the busiest channel from 1.00 back to 0.80, the same as with lookback disabled. See `LookbackTest.backfill_stops_in_a_fluctuating_noise_floor` for the regression test. A later 600 s capture confirms the shipped behaviour independently: across 145 transmissions on nine channels, lookback recovers a median 17.9 ms of onset (p90 41.6 ms) that a lookback of 0 cuts off, for a median 3.2 ms of noise released and no increase in peak `waveout`. 125 ms and 250 ms perform identically except on the slowest-rising transmissions, so 125 ms buys the same recovery for half the output delay.
+
+The per-channel (or per-frequency, as a parallel list in scan mode) `squelch_lookback` option sets the budget in milliseconds, 0-250, default 0. The delay line always holds at least `AGC_EXTRA` samples, which is the lead the AGC has always had over the audio, so a lookback of 0 leaves the timing of the audio path as it has always been. Notes:
+
+- **AM only.** NFM demodulates from the current I/Q sample rather than from the delay line; a non-zero `squelch_lookback` on an NFM channel is a config error.
+- The whole audio stream is delayed by the configured amount, so Icecast/file output runs that much later. Raw I/Q output is *not* delayed (config warns), and mixing channels with different values skews them (config warns).
+- The backfill is keyed off `Squelch::is_open()`, not the state machine's `first_open_sample()`, so a squelch held closed by CTCSS does not release buffered audio.
+- In scan mode the delay line is dropped on retune, since what it holds belongs to the previous frequency.
 
 Mixers have **no `inputs` section** — a channel connects to a mixer implicitly via an output `type = "mixer"` + `name` (+ optional `ampfactor`, `balance`), see `mixer_connect_input` (`src/config.cpp:168-193`, `src/mixer.cpp:57`).
 
