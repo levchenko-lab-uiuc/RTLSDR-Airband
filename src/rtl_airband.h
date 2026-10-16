@@ -146,36 +146,40 @@ struct icecast_data {
 };
 
 struct file_data {
+    // set once by config
+    enum output_type type;
     std::string basedir;
     std::string basename;
-    std::string suffix;
-    std::string file_path;
-    std::string file_path_tmp;
     bool dated_subdirectories;
+    std::string suffix;
     bool continuous;
     bool append;
     bool split_on_transmission;
+    bool include_freq;
     double split_min_file_time;
     double split_max_file_time;
     double split_max_idle_time;
-    bool include_freq;
-    timeval open_time;
+    bool split_include_transmission_start;
+
+    // set per output file
+    timeval transmission_start_time;
+    timeval file_open_time;
     timeval last_write_time;
+    int frequency;
+    std::string file_path;
+    std::string file_path_tmp;
     FILE* f;
-    enum output_type type;
 };
 
 struct udp_stream_data {
     float* stereo_buffer;
-    size_t stereo_buffer_len;
+    size_t stereo_buffer_len;  // number of float elements, including both channels
 
     bool continuous;
     const char* dest_address;
     const char* dest_port;
 
     int send_socket;
-    struct sockaddr dest_sockaddr;
-    socklen_t dest_sockaddr_len;
 };
 
 #ifdef WITH_PULSEAUDIO
@@ -385,9 +389,11 @@ extern bool use_localtime;
 extern bool multiple_demod_threads;
 extern bool multiple_output_threads;
 extern char* stats_filepath;
+extern double stats_update_interval;
 extern double global_split_min_file_time;
 extern double global_split_max_file_time;
 extern double global_split_max_idle_time;
+extern bool global_split_include_transmission_start;
 extern size_t fft_size, fft_size_log;
 extern int device_count, mixer_count;
 extern int shout_metadata_delay;
@@ -428,9 +434,11 @@ int parse_devices(libconfig::Setting& devs);
 int parse_mixers(libconfig::Setting& mx);
 
 // udp_stream.cpp
-bool udp_stream_init(udp_stream_data* sdata, mix_modes mode, size_t len);
-void udp_stream_write(udp_stream_data* sdata, const float* data, size_t len);
-void udp_stream_write(udp_stream_data* sdata, const float* data_left, const float* data_right, size_t len);
+// Lengths are in bytes per channel; stereo lengths must contain whole floats
+// and writes must fit the block size supplied to udp_stream_init().
+bool udp_stream_init(udp_stream_data* sdata, mix_modes mode, size_t len_bytes);
+void udp_stream_write(udp_stream_data* sdata, const float* data, size_t len_bytes);
+void udp_stream_write(udp_stream_data* sdata, const float* data_left, const float* data_right, size_t len_bytes);
 void udp_stream_shutdown(udp_stream_data* sdata);
 
 #ifdef WITH_PULSEAUDIO
