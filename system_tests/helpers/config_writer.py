@@ -99,6 +99,7 @@ def write_config(
     stats_filepath: Path | None = None,
     stats_update_interval: float | None = None,
     split_times: dict | None = None,
+    mp3: dict | None = None,
 ) -> None:
     """
     Write a minimal libconfig++-format .conf file for rtl_airband.
@@ -147,6 +148,7 @@ def write_config(
             file to this path on shutdown.
         stats_update_interval: If provided, how often (seconds) the stats file
             is rewritten while running.
+        mp3: Global encoder settings, any of mp3_bitrate, mp3_quality, mp3_vbr.
         split_times: If provided, top-level split settings written as global
             config keys (split_min_file_time / split_max_file_time /
             split_max_idle_time / split_include_transmission_start).
@@ -154,6 +156,10 @@ def write_config(
     lines = []
     if fft_size is not None:
         lines.append(f"fft_size = {fft_size};")
+
+    for key, value in (mp3 or {}).items():
+        rendered = str(value).lower() if isinstance(value, bool) else value
+        lines.append(f"{key} = {rendered};")
 
     for key, value in (split_times or {}).items():
         lines.append(f"{key} = {_config_value(value)};")

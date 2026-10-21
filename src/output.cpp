@@ -152,7 +152,7 @@ void shout_setup(icecast_data* icecast, mix_modes mixmode) {
     }
 }
 
-lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass) {
+lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass, int bitrate, int quality, bool vbr) {
     lame_t lame = lame_init();
     if (!lame) {
         log(LOG_WARNING, "lame_init failed\n");
@@ -160,9 +160,11 @@ lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass) {
     }
 
     lame_set_in_samplerate(lame, WAVE_RATE);
-    lame_set_VBR(lame, vbr_mtrh);
-    lame_set_brate(lame, 16);
-    lame_set_quality(lame, 7);
+    // With vbr_mtrh the bitrate is a target the encoder may fall below on quiet passages; with
+    // vbr_off it is held constant.  The defaults keep the historic 16 kbps VBR behaviour.
+    lame_set_VBR(lame, vbr ? vbr_mtrh : vbr_off);
+    lame_set_brate(lame, bitrate);
+    lame_set_quality(lame, quality);
     lame_set_lowpassfreq(lame, lowpass);
     lame_set_highpassfreq(lame, highpass);
     lame_set_out_samplerate(lame, MP3_RATE);
@@ -173,7 +175,7 @@ lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass) {
         lame_set_num_channels(lame, 1);
         lame_set_mode(lame, MONO);
     }
-    debug_print("lame init with mixmode=%s\n", mixmode == MM_STEREO ? "MM_STEREO" : "MM_MONO");
+    debug_print("lame init with mixmode=%s, bitrate=%d, quality=%d, vbr=%d\n", mixmode == MM_STEREO ? "MM_STEREO" : "MM_MONO", bitrate, quality, (int)vbr);
     lame_init_params(lame);
     return lame;
 }
@@ -199,7 +201,7 @@ class LameTone {
             }
         } else
             memset(buf, 0, samples * sizeof(float));
-        lame_t lame = airlame_init(mixmode, 0, 0);
+        lame_t lame = airlame_init(mixmode, 0, 0, global_mp3_bitrate, global_mp3_quality, global_mp3_vbr);
         if (lame) {
             _bytes = lame_encode_buffer_ieee_float(lame, buf, (mixmode == MM_STEREO ? buf : NULL), samples, _data, LAMEBUF_SIZE);
             if (_bytes > 0) {

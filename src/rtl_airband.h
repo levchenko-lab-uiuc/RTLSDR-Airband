@@ -302,8 +302,11 @@ struct channel_t {
     enum ch_states state;  // mixer channel state flag
     int output_count;
     output_t* outputs;
-    int highpass;  // highpass filter cutoff
-    int lowpass;   // lowpass filter cutoff
+    int highpass;     // highpass filter cutoff
+    int lowpass;      // lowpass filter cutoff
+    int mp3_bitrate;  // kbps handed to the encoder
+    int mp3_quality;  // LAME algorithm quality, 0 best to 9 fastest
+    bool mp3_vbr;     // variable bitrate; the bitrate above is then a target, not a constant
 };
 
 enum rec_modes { R_MULTICHANNEL, R_SCAN };
@@ -377,7 +380,7 @@ struct output_params_t {
 extern char const* RTL_AIRBAND_VERSION;
 
 // output.cpp
-lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass);
+lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass, int bitrate, int quality, bool vbr);
 void shout_setup(icecast_data* icecast, mix_modes mixmode);
 void disable_device_outputs(device_t* dev);
 void disable_channel_outputs(channel_t* channel);
@@ -390,6 +393,10 @@ extern bool multiple_demod_threads;
 extern bool multiple_output_threads;
 extern char* stats_filepath;
 extern double stats_update_interval;
+
+extern int global_mp3_bitrate;
+extern int global_mp3_quality;
+extern bool global_mp3_vbr;
 extern double global_split_min_file_time;
 extern double global_split_max_file_time;
 extern double global_split_max_idle_time;

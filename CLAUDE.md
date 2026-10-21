@@ -384,6 +384,33 @@ Output types: `icecast`, `file`, `rawfile`, `udp_stream`, `mixer`, `pulse`.
 
 `file`/`rawfile` outputs with `split_on_transmission = true` can set `split_include_transmission_start` (per output > global > default `false`; the global is parsed in `main()` in `src/rtl_airband.cpp`, the per-output value in `parse_split_file_times` in `src/config.cpp`). It changes only file names, never when files close. A transmission cut by `split_max_file_time` is named `<template>_<tx start>_<part start>[_<freq>]<suffix>`; part 1 repeats the tx start, and unsplit transmissions keep `<template>_<start>`. Names are built by `build_output_filename` (`src/output.cpp`). Part 1 is written under the standalone `.tmp` name and renamed to the part name in `close_if_necessary` when it is split; parts 2+ open under the part name, in the tx start's dated folder. A file that reaches max time while squelch is closed ends the transmission, as it always closed there. Examples: `config/split_include_transmission_start*.conf`.
 
+### MP3 Encoder Settings
+
+`airlame_init()` (`src/output.cpp`) took its bitrate, quality and VBR mode as literals chosen for
+streaming many channels to Icecast over a thin uplink. They are config options now:
+
+| option | default | meaning |
+|---|---|---|
+| `mp3_bitrate` | 16 | kbps, 8-320 |
+| `mp3_quality` | 7 | LAME algorithm quality, 0 best to 9 fastest |
+| `mp3_vbr` | true | `vbr_mtrh`; false selects constant bitrate |
+
+Settable globally or per channel (and per mixer), the channel value winning. The defaults are the
+values that were compiled in, so an existing config encodes byte for byte as before -
+`test_mp3_defaults_are_unchanged` asserts exactly that.
+
+With VBR the bitrate is a target the encoder may fall below on quiet passages; with
+`mp3_vbr = false` it is held constant, which is what makes a size comparison meaningful.
+`valid_mp3_settings()` rejects out of range values at parse time rather than leaving
+`lame_init_params()` to fail, since that failure would otherwise leave the channel running with
+no encoder and no explanation.
+
+The output sample rate stays at `MP3_RATE` (8000): `output.cpp:114` also reports it to Icecast as
+stream metadata, so making it per channel would need that path changed too.
+
+`test_mp3_options` asserts on encoded size rather than on the frame header, because a bitrate that
+is parsed and then dropped still yields a valid MP3 with a plausible header.
+
 ### Unit Tests
 
 Tests use Google Test (fetched via CMake FetchContent). Test files in `src/test_*.cpp` cover filters, squelch, CTCSS, helper functions, and signal generation. `src/test_base_class.h` provides test utilities.

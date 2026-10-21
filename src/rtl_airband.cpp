@@ -85,6 +85,10 @@ bool multiple_output_threads = false;
 bool log_scan_activity = false;
 char* stats_filepath = NULL;
 double stats_update_interval = 15.0;
+
+int global_mp3_bitrate = 16;
+int global_mp3_quality = 7;
+bool global_mp3_vbr = true;
 double global_split_min_file_time = 1.0;
 double global_split_max_file_time = 60.0 * 60.0;
 double global_split_max_idle_time = 0.5;
@@ -276,7 +280,7 @@ void init_demod(demod_params_t* params, Signal* signal, int device_start, int de
 
 bool init_output(channel_t* channel, output_t* output) {
     if (output->has_mp3_output) {
-        output->lame = airlame_init(channel->mode, channel->highpass, channel->lowpass);
+        output->lame = airlame_init(channel->mode, channel->highpass, channel->lowpass, channel->mp3_bitrate, channel->mp3_quality, channel->mp3_vbr);
         output->lamebuf = (unsigned char*)malloc(sizeof(unsigned char) * LAMEBUF_SIZE);
     }
     if (output->type == O_ICECAST) {
@@ -958,6 +962,20 @@ int main(int argc, char* argv[]) {
         }
         if (root.exists("stats_update_interval") && !stats_filepath)
             cerr << "Warning: stats_update_interval is ignored without stats_filepath\n";
+
+        if (root.exists("mp3_bitrate")) {
+            global_mp3_bitrate = (int)root["mp3_bitrate"];
+        }
+        if (root.exists("mp3_quality")) {
+            global_mp3_quality = (int)root["mp3_quality"];
+        }
+        if (root.exists("mp3_vbr")) {
+            global_mp3_vbr = (bool)root["mp3_vbr"];
+        }
+        if (!valid_mp3_settings(global_mp3_bitrate, global_mp3_quality)) {
+            cerr << "Configuration error: " << mp3_settings_constraint << "\n";
+            error();
+        }
         parse_global_double(root, "split_min_file_time", &global_split_min_file_time);
         parse_global_double(root, "split_max_file_time", &global_split_max_file_time);
         parse_global_double(root, "split_max_idle_time", &global_split_max_idle_time);

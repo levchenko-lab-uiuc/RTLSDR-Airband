@@ -109,6 +109,15 @@ bool valid_stats_update_interval(double stats_update_interval) {
     return stats_update_interval > 0.0;
 }
 
+const char* const mp3_settings_constraint = "invalid mp3 settings (need mp3_bitrate 8-320 kbps, mp3_quality 0-9)";
+
+// Checked here rather than left to the encoder: lame_init_params() rejects an out of range
+// bitrate by returning an error, and the channel would then run on with no encoder at all
+// rather than saying why.
+bool valid_mp3_settings(int bitrate, int quality) {
+    return (bitrate >= 8) && (bitrate <= 320) && (quality >= 0) && (quality <= 9);
+}
+
 bool setting_as_double(const libconfig::Setting& setting, double* value) {
     switch (setting.getType()) {
         case libconfig::Setting::TypeFloat:

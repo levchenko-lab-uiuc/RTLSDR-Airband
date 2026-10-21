@@ -364,6 +364,14 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
         channel->freq_idx = 0;
         channel->highpass = chans[j].exists("highpass") ? (int)chans[j]["highpass"] : 100;
         channel->lowpass = chans[j].exists("lowpass") ? (int)chans[j]["lowpass"] : 2500;
+        channel->mp3_bitrate = chans[j].exists("mp3_bitrate") ? (int)chans[j]["mp3_bitrate"] : global_mp3_bitrate;
+        channel->mp3_quality = chans[j].exists("mp3_quality") ? (int)chans[j]["mp3_quality"] : global_mp3_quality;
+        channel->mp3_vbr = chans[j].exists("mp3_vbr") ? (bool)chans[j]["mp3_vbr"] : global_mp3_vbr;
+        if (!valid_mp3_settings(channel->mp3_bitrate, channel->mp3_quality)) {
+            cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "]: " << mp3_settings_constraint << "\n";
+            error();
+        }
+
 #ifdef NFM
         channel->pr = 0;
         channel->pj = 0;
@@ -964,6 +972,14 @@ int parse_mixers(libconfig::Setting& mx) {
         channel_t* channel = &mixer->channel;
         channel->highpass = mx[i].exists("highpass") ? (int)mx[i]["highpass"] : 100;
         channel->lowpass = mx[i].exists("lowpass") ? (int)mx[i]["lowpass"] : 2500;
+        channel->mp3_bitrate = mx[i].exists("mp3_bitrate") ? (int)mx[i]["mp3_bitrate"] : global_mp3_bitrate;
+        channel->mp3_quality = mx[i].exists("mp3_quality") ? (int)mx[i]["mp3_quality"] : global_mp3_quality;
+        channel->mp3_vbr = mx[i].exists("mp3_vbr") ? (bool)mx[i]["mp3_vbr"] : global_mp3_vbr;
+        if (!valid_mp3_settings(channel->mp3_bitrate, channel->mp3_quality)) {
+            cerr << "Configuration error: mixers.[" << i << "]: " << mp3_settings_constraint << "\n";
+            error();
+        }
+
         channel->mode = MM_MONO;
 
         // Make sure lowpass / highpass aren't flipped.

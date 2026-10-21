@@ -256,6 +256,26 @@ TEST_F(HelperFunctionsTest, valid_stats_update_interval_not_positive) {
     EXPECT_FALSE(valid_stats_update_interval(-1.0));
 }
 
+TEST_F(HelperFunctionsTest, valid_mp3_settings_ok) {
+    EXPECT_TRUE(valid_mp3_settings(16, 7));
+    EXPECT_TRUE(valid_mp3_settings(8, 0));
+    EXPECT_TRUE(valid_mp3_settings(320, 9));
+}
+
+TEST_F(HelperFunctionsTest, valid_mp3_settings_bitrate_out_of_range) {
+    // LAME accepts 8-320 kbps; anything else makes lame_init_params fail at run time, which
+    // would otherwise surface as a channel that silently produces no audio
+    EXPECT_FALSE(valid_mp3_settings(7, 7));
+    EXPECT_FALSE(valid_mp3_settings(321, 7));
+    EXPECT_FALSE(valid_mp3_settings(0, 7));
+    EXPECT_FALSE(valid_mp3_settings(-16, 7));
+}
+
+TEST_F(HelperFunctionsTest, valid_mp3_settings_quality_out_of_range) {
+    EXPECT_FALSE(valid_mp3_settings(16, -1));
+    EXPECT_FALSE(valid_mp3_settings(16, 10));
+}
+
 TEST_F(HelperFunctionsTest, setting_as_double_int) {
     libconfig::Config config;
     libconfig::Setting& s = config.getRoot().add("value", libconfig::Setting::TypeInt);
