@@ -242,6 +242,33 @@ Mixers have **no `inputs` section** — a channel connects to a mixer implicitly
 
 Output types: `icecast`, `file`, `rawfile`, `udp_stream`, `mixer`, `pulse`.
 
+### MP3 Encoder Settings
+
+`airlame_init()` (`src/output.cpp`) took its bitrate, quality and VBR mode as literals chosen for
+streaming many channels to Icecast over a thin uplink. They are config options now:
+
+| option | default | meaning |
+|---|---|---|
+| `mp3_bitrate` | 16 | kbps, 8-320 |
+| `mp3_quality` | 7 | LAME algorithm quality, 0 best to 9 fastest |
+| `mp3_vbr` | true | `vbr_mtrh`; false selects constant bitrate |
+
+Settable globally or per channel (and per mixer), the channel value winning. The defaults are the
+values that were compiled in, so an existing config encodes byte for byte as before -
+`test_mp3_defaults_are_unchanged` asserts exactly that.
+
+With VBR the bitrate is a target the encoder may fall below on quiet passages; with
+`mp3_vbr = false` it is held constant, which is what makes a size comparison meaningful.
+`valid_mp3_settings()` rejects out of range values at parse time rather than leaving
+`lame_init_params()` to fail, since that failure would otherwise leave the channel running with
+no encoder and no explanation.
+
+The output sample rate stays at `MP3_RATE` (8000): `output.cpp:114` also reports it to Icecast as
+stream metadata, so making it per channel would need that path changed too.
+
+`test_mp3_options` asserts on encoded size rather than on the frame header, because a bitrate that
+is parsed and then dropped still yields a valid MP3 with a plausible header.
+
 ### Unit Tests
 
 Tests use Google Test (fetched via CMake FetchContent). Test files in `src/test_*.cpp` cover filters, squelch, CTCSS, helper functions, and signal generation. `src/test_base_class.h` provides test utilities.

@@ -77,6 +77,7 @@ def write_config(
     mp3_tmp_dir: Path | None = None,
     stats_filepath: Path | None = None,
     split_times: dict | None = None,
+    mp3: dict | None = None,
 ) -> None:
     """
     Write a minimal libconfig++-format .conf file for rtl_airband.
@@ -117,6 +118,7 @@ def write_config(
             to find and validate the resulting file.
         stats_filepath: If provided, rtl_airband writes a Prometheus-format stats
             file to this path on shutdown.
+        mp3: Global encoder settings, any of mp3_bitrate, mp3_quality, mp3_vbr.
         split_times: If provided, top-level split file time settings written as
             global config keys (split_min_file_time / split_max_file_time /
             split_max_idle_time).
@@ -124,6 +126,10 @@ def write_config(
     lines = []
     if fft_size is not None:
         lines.append(f"fft_size = {fft_size};")
+
+    for key, value in (mp3 or {}).items():
+        rendered = str(value).lower() if isinstance(value, bool) else value
+        lines.append(f"{key} = {rendered};")
 
     for key, value in (split_times or {}).items():
         lines.append(f"{key} = {value};")
