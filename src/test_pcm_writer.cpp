@@ -231,6 +231,46 @@ TEST_F(PcmWriterTest, creates_directories_the_template_asks_for) {
     EXPECT_FALSE(data_lines(PcmWriter::index_path_for(path)).empty()) << "the index belongs in the same directory";
 }
 
+TEST_F(PcmWriterTest, a_write_that_fails_does_not_leave_a_lying_index) {
+    // /dev/full accepts the open and fails every write with ENOSPC, which is what a full disk
+    // does.  The danger is not the lost audio - it is the index: if it keeps counting samples
+    // that never reached the file, every file_sample after the failure points past the end and
+    // the whole index becomes untrustworthy rather than merely short.
+    PcmWriter writer;
+    writer.configure("/dev/full", RATE);
+    push(writer, 400, true);
+    push(writer, 400, true);
+    writer.close();
+
+    EXPECT_FALSE(writer.is_healthy()) << "a failed write has to be visible to the caller";
+    EXPECT_EQ(writer.transmission_count(), 0u) << "nothing was recorded, so nothing may be claimed";
+}
+
+TEST_F(PcmWriterTest, an_unopenable_path_is_reported_once_not_every_batch) {
+    // A permission problem persists, and write() is called eight times a second per channel.
+    // Retrying the open each time would flood the log; the retry belongs at the next rotation.
+    PcmWriter writer;
+    writer.configure("/proc/nope/out.wav", RATE);
+    for (int i = 0; i < 20; i++) {
+        push(writer, 100, true);
+    }
+    EXPECT_FALSE(writer.is_healthy());
+    EXPECT_EQ(writer.open_attempts(), 1u) << "one attempt for this filename, not one per batch";
+    writer.close();
+}
+
+TEST_F(PcmWriterTest, a_new_filename_retries_after_a_failure) {
+    // Disk-full may clear, and an hourly recorder should come back on its own at the next file
+    // rather than staying dead until someone restarts it.
+    PcmWriter writer;
+    writer.configure(temp_dir + "/%S/out.wav", RATE);
+    push(writer, 100, true, 0.5f, when);
+    const unsigned long long first = writer.open_attempts();
+    push(writer, 100, true, 0.5f, when + 1);
+    EXPECT_GT(writer.open_attempts(), first) << "a different filename is a fresh start";
+    writer.close();
+}
+
 TEST_F(PcmWriterTest, rotates_when_the_formatted_name_changes) {
     PcmWriter writer;
     // seconds in the template, so the rotation period is one second

@@ -288,6 +288,24 @@ Two things worth knowing about the implementation:
   shutdown path. A file left behind by a crash therefore claims zero length; the index is flushed
   after every transmission, so it stays readable, which is the more useful half in that case.
 
+**Write errors never reach the rest of the channel.** A recording that cannot be written is
+abandoned - reported once with `strerror`, both files closed - and the channel carries on feeding
+Icecast and everything else. The feed matters more than the archive.
+`test_pcm_failure_does_not_stop_the_stream` asserts that with an unwritable path.
+
+The failure is cleared when the template formats to a new name, so a disk that has been emptied
+is picked up at the next rotation rather than needing a restart. A path that cannot be opened is
+attempted once per filename, not once per batch: `write()` runs eight times a second per channel,
+and retrying there would flood the log.
+
+The file is flushed every batch, which is not merely about crash safety. **stdio buffering hides
+ENOSPC**: `fwrite` succeeds while the bytes sit in a 4 KB buffer and only the eventual flush
+fails, so without flushing the index would keep counting samples that were still queued behind a
+write destined to fail - and would then describe audio the file never received. `put()` therefore
+checks `ferror()` as well as the byte count, since the failing call is the flush, not the write
+that overflowed the buffer. `/dev/full` makes this testable: it accepts the open and fails every
+write with ENOSPC.
+
 The audio rate is `WAVE_RATE`, deliberately not resampled. A channel is one FFT bin, about 4.9 kHz
 at 10 Msps over 2048, so writing it at a higher rate would be interpolation: more bytes, no more
 information. Raising `WAVE_RATE` itself is not the answer either - it does not widen the bin, it

@@ -73,6 +73,12 @@ class PcmWriter {
     void close(void);
 
     bool is_configured(void) const;
+    // False once a write or an open has failed for the current file.  Cleared when the template
+    // formats to a new name, so a disk that frees up is picked up at the next rotation rather
+    // than needing a restart.
+    bool is_healthy(void) const;
+    // Opens attempted, for tests: a failing path must not be retried once per batch.
+    uint64_t open_attempts(void) const;
     const std::string& current_path(void) const;
     // Transmissions completed and written to the index since this file was opened
     uint64_t transmission_count(void) const;
@@ -87,6 +93,9 @@ class PcmWriter {
    private:
     void open_for(time_t when);
     void finish_transmission(void);
+    // Returns false and shuts the file down after reporting, so the caller stops counting
+    bool put(const void* data, size_t bytes);
+    void fail(const char* what);
 
     std::string template_;
     int sample_rate_;
@@ -99,6 +108,9 @@ class PcmWriter {
     uint64_t orig_samples_;  // position in the continuous audio, silence included
     uint64_t file_samples_;  // position in the file, silence removed
     uint64_t transmissions_;
+
+    bool failed_;
+    uint64_t open_attempts_;
 
     bool in_transmission_;
     uint64_t tx_orig_start_;

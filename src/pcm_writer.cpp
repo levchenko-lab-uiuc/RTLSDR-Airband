@@ -19,6 +19,7 @@
 
 #include "pcm_writer.h"
 
+#include <cerrno>
 #include <cstring>
 #include <vector>
 
@@ -66,6 +67,8 @@ PcmWriter::PcmWriter(void) {
     orig_samples_ = 0;
     file_samples_ = 0;
     transmissions_ = 0;
+    failed_ = false;
+    open_attempts_ = 0;
     in_transmission_ = false;
     tx_orig_start_ = 0;
     tx_file_start_ = 0;
@@ -84,6 +87,44 @@ void PcmWriter::configure(const std::string& filename_template, int sample_rate)
 
 bool PcmWriter::is_configured(void) const {
     return !template_.empty() && sample_rate_ > 0;
+}
+
+bool PcmWriter::is_healthy(void) const {
+    return !failed_;
+}
+
+uint64_t PcmWriter::open_attempts(void) const {
+    return open_attempts_;
+}
+
+void PcmWriter::fail(const char* what) {
+    log(LOG_WARNING, "pcm: %s %s (%s); this file is abandoned, the next one will be tried\n", what, audio_path_.c_str(), strerror(errno));
+    failed_ = true;
+    if (audio_ != NULL) {
+        fclose(audio_);
+        audio_ = NULL;
+    }
+    if (index_ != NULL) {
+        fclose(index_);
+        index_ = NULL;
+    }
+    // Anything buffered for this transmission is gone with the file, so it must not be counted
+    in_transmission_ = false;
+}
+
+bool PcmWriter::put(const void* data, size_t bytes) {
+    if (audio_ == NULL) {
+        return false;
+    }
+    // ferror as well as the count: stdio buffers, so a full disk does not fail the fwrite that
+    // overflows the buffer - it fails the flush, and only the error flag shows it.
+    if (fwrite(data, 1, bytes, audio_) == bytes && !ferror(audio_)) {
+        return true;
+    }
+    // A short write is a full disk far more often than anything else.  Carrying on would lose
+    // the audio quietly and, worse, leave the index describing samples that are not in the file.
+    fail("cannot write to");
+    return false;
 }
 
 const std::string& PcmWriter::current_path(void) const {
@@ -137,9 +178,10 @@ void PcmWriter::open_for(time_t when) {
     index_path_ = index_path_for(audio_path_);
 
     make_parent_dirs(audio_path_);
+    open_attempts_++;
     audio_ = fopen(audio_path_.c_str(), "wb");
     if (audio_ == NULL) {
-        log(LOG_WARNING, "pcm: could not open %s for writing\n", audio_path_.c_str());
+        fail("could not open");
         return;
     }
 
@@ -158,11 +200,14 @@ void PcmWriter::open_for(time_t when) {
     put_le16(header + 34, 16);                              // bits per sample
     memcpy(header + 36, "data", 4);
     put_le32(header + 40, 0);
-    fwrite(header, 1, sizeof(header), audio_);
+    if (!put(header, sizeof(header))) {
+        return;
+    }
 
     index_ = fopen(index_path_.c_str(), "w");
     if (index_ == NULL) {
-        log(LOG_WARNING, "pcm: could not open %s for writing\n", index_path_.c_str());
+        // The audio is still worth having without it, so this is not fatal to the file
+        log(LOG_WARNING, "pcm: could not open %s (%s); audio will be written without an index\n", index_path_.c_str(), strerror(errno));
     } else {
         char stamp[64];
         struct tm parts;
@@ -210,13 +255,17 @@ void PcmWriter::write(const float* samples, const unsigned char* gate, size_t co
         return;
     }
 
-    // Rotation is "the formatted name changed", so the template's finest field sets the period
-    if (audio_ == NULL || format_name(template_, now) != audio_path_) {
+    // Rotation is "the formatted name changed", so the template's finest field sets the period.
+    // A new name also clears a previous failure: a disk that has been emptied, or a directory
+    // that has been fixed, is picked up at the next file rather than needing a restart.
+    const std::string wanted = format_name(template_, now);
+    if (wanted != audio_path_) {
         close();
+        failed_ = false;
         open_for(now);
-        if (audio_ == NULL) {
-            return;
-        }
+    }
+    if (failed_ || audio_ == NULL) {
+        return;
     }
 
     int16_t block[CONVERT_BLOCK];
@@ -232,14 +281,18 @@ void PcmWriter::write(const float* samples, const unsigned char* gate, size_t co
             }
             block[pending++] = to_pcm16(samples[i]);
             if (pending == CONVERT_BLOCK) {
-                fwrite(block, sizeof(int16_t), pending, audio_);
+                if (!put(block, pending * sizeof(int16_t))) {
+                    return;
+                }
                 pending = 0;
             }
             file_samples_++;
             tx_samples_++;
         } else if (in_transmission_) {
             if (pending > 0) {
-                fwrite(block, sizeof(int16_t), pending, audio_);
+                if (!put(block, pending * sizeof(int16_t))) {
+                    return;
+                }
                 pending = 0;
             }
             finish_transmission();
@@ -247,8 +300,15 @@ void PcmWriter::write(const float* samples, const unsigned char* gate, size_t co
         orig_samples_++;
     }
 
-    if (pending > 0) {
-        fwrite(block, sizeof(int16_t), pending, audio_);
+    if (pending > 0 && !put(block, pending * sizeof(int16_t))) {
+        return;
+    }
+
+    // Flushed every batch so a full disk is noticed within 125 ms rather than whenever stdio
+    // happens to empty its buffer.  Without this the index would keep counting samples that are
+    // still in a buffer destined to fail, and describe audio the file never received.
+    if (audio_ != NULL && (fflush(audio_) != 0 || ferror(audio_))) {
+        fail("cannot write to");
     }
 }
 

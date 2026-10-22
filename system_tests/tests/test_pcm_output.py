@@ -62,6 +62,59 @@ def _header_text(path: Path) -> str:
     )
 
 
+def test_pcm_failure_does_not_stop_the_stream(
+    binary_under_test: BinaryUnderTest,
+    test_output_dir: Path,
+    cache_dir: Path,
+    speedup_factor: float,
+) -> None:
+    """A recording that cannot be written must not take the other outputs with it.
+
+    The feed matters more than the archive: if the disk fills or the directory is not
+    writable, the channel has to keep producing audio for everything else it feeds.
+    """
+    iq_file = iq_generator.get_or_generate_am(
+        offset_hz=CHANNEL_OFFSET_HZ,
+        audio_hz=AUDIO_TONE_HZ,
+        duration_s=DURATION_S,
+        cache_dir=cache_dir,
+    )
+
+    mp3_dir = test_output_dir / "mp3"
+    mp3_dir.mkdir(parents=True, exist_ok=True)
+    config_path = test_output_dir / "rtl_airband.conf"
+
+    config_writer.write_config(
+        config_path=config_path,
+        iq_filepath=iq_file,
+        sample_rate=SAMPLE_RATE,
+        centerfreq_hz=CENTERFREQ_HZ,
+        channels=[
+            {
+                "freq_hz": CENTERFREQ_HZ + CHANNEL_OFFSET_HZ,
+                "output_filename_template": "still_running",
+                # unwritable: /proc rejects the open outright
+                "pcm_output": "/proc/no_such_dir/out_%H.wav",
+            }
+        ],
+        output_dir=test_output_dir,
+        speedup_factor=speedup_factor,
+        mode="multichannel",
+        mp3_tmp_dir=mp3_dir,
+    )
+
+    run_rtl_airband(binary_under_test.path, config_path, timeout_s=TIMEOUT_S)
+    time.sleep(0.5)
+
+    produced = sum(f.stat().st_size for f in mp3_dir.rglob("*.mp3"))
+    assert (
+        produced > 0
+    ), "the MP3 output stopped when the PCM recording could not be written"
+    print(
+        f"pcm output failed as intended; the channel still produced {produced} bytes of MP3"
+    )
+
+
 def test_pcm_output(
     binary_under_test: BinaryUnderTest,
     test_output_dir: Path,
