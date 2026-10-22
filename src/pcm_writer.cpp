@@ -22,6 +22,7 @@
 #include <cstring>
 #include <vector>
 
+#include "helper_functions.h"
 #include "logging.h"
 
 namespace {
@@ -117,10 +118,25 @@ std::string PcmWriter::index_path_for(const std::string& audio_path) {
     return audio_path.substr(0, dot) + ".idx";
 }
 
+// A strftime template invites a dated tree - "%Y/%m/%d/kcmi_%H.wav" - and the day's directory
+// will not exist the first time that day rolls round.  fopen would simply fail, leaving a warning
+// in the log and no recording, so every component is created first.
+static void make_parent_dirs(const std::string& path) {
+    size_t at = path.find('/', path.empty() || path[0] != '/' ? 0 : 1);
+    while (at != std::string::npos) {
+        const std::string prefix = path.substr(0, at);
+        if (!prefix.empty() && !dir_exists(prefix)) {
+            make_dir(prefix);
+        }
+        at = path.find('/', at + 1);
+    }
+}
+
 void PcmWriter::open_for(time_t when) {
     audio_path_ = format_name(template_, when);
     index_path_ = index_path_for(audio_path_);
 
+    make_parent_dirs(audio_path_);
     audio_ = fopen(audio_path_.c_str(), "wb");
     if (audio_ == NULL) {
         log(LOG_WARNING, "pcm: could not open %s for writing\n", audio_path_.c_str());

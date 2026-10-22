@@ -217,6 +217,20 @@ TEST_F(PcmWriterTest, a_transmission_spanning_batches_is_one_entry) {
     EXPECT_EQ(lines[0], "0 0 600");
 }
 
+TEST_F(PcmWriterTest, creates_directories_the_template_asks_for) {
+    PcmWriter writer;
+    // a strftime template naturally produces a dated tree, and none of it exists yet
+    writer.configure(temp_dir + "/%Y/%m/%d/out.wav", RATE);
+    push(writer, 400, true);
+    const string path = writer.current_path();
+    writer.close();
+
+    EXPECT_NE(path.find(temp_dir), string::npos);
+    const vector<uint8_t> b = read_bytes(path);
+    EXPECT_EQ(b.size(), 44u + 400u * 2) << "nothing was written, so the directories were not created";
+    EXPECT_FALSE(data_lines(PcmWriter::index_path_for(path)).empty()) << "the index belongs in the same directory";
+}
+
 TEST_F(PcmWriterTest, rotates_when_the_formatted_name_changes) {
     PcmWriter writer;
     // seconds in the template, so the rotation period is one second

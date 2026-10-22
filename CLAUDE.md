@@ -251,8 +251,13 @@ the samples the squelch passed (`src/pcm_writer.cpp/h`).
 { type = "pcmfile"; filename_template = "/recordings/kcmi_app_%Y%m%d_%H.wav"; }
 ```
 
-`filename_template` is a **strftime() format for the whole path**, and that is also what drives
-rotation: the file closes and a new one opens whenever formatting the template against the
+`filename_template` is a **strftime() format for the whole path** - there is no separate
+`directory` key, unlike `file` and `rawfile`, because the template already carries one and a
+second source of truth could disagree with it. Any directories it names are created as needed,
+which matters because a dated tree such as `%Y/%m/%d/kcmi_%H.wav` has a directory that does not
+exist the first time each day rolls round; `fopen` alone would log a warning and record nothing.
+
+The template is also what drives rotation: the file closes and a new one opens whenever formatting the template against the
 current time yields a different name. So `%H` rotates hourly and `%M` would rotate per minute -
 the period is a property of the template rather than a separate setting that could contradict it.
 That also makes rotation testable without waiting an hour.
