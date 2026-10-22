@@ -11,7 +11,8 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
     """
     Render the outputs: ( ... ); block for one channel.
 
-    File outputs use directory+template+append, mixer outputs use name+balance.
+    File outputs use directory+template+append, mixer outputs use name+balance,
+    pcmfile outputs take a single strftime filename_template.
     Entries from the channel's split_outputs additionally enable
     split_on_transmission and carry any per-output split file time overrides.
     """
@@ -24,6 +25,8 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
                 "template": ch["output_filename_template"],
             }
         )
+    if ch.get("pcm_output") is not None:
+        entries.append({"type": "pcmfile", "template": ch["pcm_output"]})
     if ch.get("mixer_output") is not None:
         entries.append(
             {
@@ -50,6 +53,9 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
         if entry["type"] == "mixer":
             lines.append(f'          name = "{entry["name"]}";')
             lines.append(f'          balance = {entry["balance"]:.1f};')
+        elif entry["type"] == "pcmfile":
+            # a strftime path for the whole file; there is no separate directory
+            lines.append(f'          filename_template = "{entry["template"]}";')
         else:
             lines.append(f'          directory = "{entry["directory"]}";')
             lines.append(f'          filename_template = "{entry["template"]}";')

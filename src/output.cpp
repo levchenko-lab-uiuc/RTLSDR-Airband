@@ -572,6 +572,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
         } else if (channel->outputs[k].type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(channel->outputs[k].data);
             mixer_put_samples(mdata->mixer, mdata->input, channel->waveout, channel->axcindicate != NO_SIGNAL, WAVE_BATCH);
+        } else if (channel->outputs[k].type == O_PCMFILE) {
+            pcm_file_data* pdata = (pcm_file_data*)(channel->outputs[k].data);
+            // The writer keeps only the samples the gate passed, so it is handed the whole batch
+            // and decides per sample; the index it writes is what makes the gaps recoverable.
+            pdata->writer.write(channel->waveout, channel->gate_out, WAVE_BATCH, time(NULL));
         } else if (channel->outputs[k].type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)channel->outputs[k].data;
 
@@ -611,6 +616,10 @@ void disable_channel_outputs(channel_t* channel) {
             icecast->shout = NULL;
         } else if (output->type == O_FILE || output->type == O_RAWFILE) {
             close_file(&channel->outputs[k]);
+        } else if (output->type == O_PCMFILE) {
+            // Closing patches the two length fields in the WAV header, which cannot be written
+            // until the length is known, and flushes a transmission still open at shutdown.
+            ((pcm_file_data*)(output->data))->writer.close();
         } else if (output->type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(output->data);
             mixer_disable_input(mdata->mixer, mdata->input);

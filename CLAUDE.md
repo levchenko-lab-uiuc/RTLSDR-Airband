@@ -240,7 +240,55 @@ mixers: { mix1: { outputs: ( { type = "icecast"; ... } ); } };
 
 Mixers have **no `inputs` section** — a channel connects to a mixer implicitly via an output `type = "mixer"` + `name` (+ optional `ampfactor`, `balance`), see `mixer_connect_input` (`src/config.cpp:168-193`, `src/mixer.cpp:57`).
 
-Output types: `icecast`, `file`, `rawfile`, `udp_stream`, `mixer`, `pulse`.
+Output types: `icecast`, `file`, `rawfile`, `pcmfile`, `udp_stream`, `mixer`, `pulse`.
+
+### Unencoded Audio: the `pcmfile` Output
+
+Writes the demodulated audio as 16-bit PCM at `WAVE_RATE`, no encoder in the path, keeping only
+the samples the squelch passed (`src/pcm_writer.cpp/h`).
+
+```
+{ type = "pcmfile"; filename_template = "/recordings/kcmi_app_%Y%m%d_%H.wav"; }
+```
+
+`filename_template` is a **strftime() format for the whole path**, and that is also what drives
+rotation: the file closes and a new one opens whenever formatting the template against the
+current time yields a different name. So `%H` rotates hourly and `%M` would rotate per minute -
+the period is a property of the template rather than a separate setting that could contradict it.
+That also makes rotation testable without waiting an hour.
+
+Dropping the silence loses the timing, so every audio file is paired with an index of the same
+name and a `.idx` extension, one line per transmission:
+
+```
+# orig_sample file_sample num_samples
+24000 0 8000
+96000 8000 12000
+```
+
+`orig_sample` is where the transmission began in the continuous audio, counting the silence that
+was never written; `file_sample` is where it begins in the WAV; `num_samples` is its length.
+Sample 0 is the first sample of that file, and the commented header records the wall-clock time
+the file was opened, so a sample number converts to a time without the reader having to know when
+rotation happened.
+
+Two things worth knowing about the implementation:
+
+- **The gate is recorded per sample, not inferred.** `channel_t::gate_out` is filled in the demod
+  loop beside `waveout`. `axcindicate` only resolves to a whole `WAVE_BATCH` (125 ms), far too
+  coarse for a sample-accurate index, and the zeros in `waveout` cannot be distinguished from a
+  sample that is genuinely zero - which would split one transmission into two.
+- **A WAV header states a length that is not known when it is written.** The header goes down with
+  zeros in both size fields and they are patched by `close()`, which is reached from the output
+  shutdown path. A file left behind by a crash therefore claims zero length; the index is flushed
+  after every transmission, so it stays readable, which is the more useful half in that case.
+
+The audio rate is `WAVE_RATE`, deliberately not resampled. A channel is one FFT bin, about 4.9 kHz
+at 10 Msps over 2048, so writing it at a higher rate would be interpolation: more bytes, no more
+information. Raising `WAVE_RATE` itself is not the answer either - it does not widen the bin, it
+multiplies the FFT rate (`rtl_airband.cpp:426` hops `sample_rate / WAVE_RATE`), and it silently
+divides every timing constant expressed in samples, including the squelch's 197-sample open and
+close delays and `AGC_EXTRA`.
 
 ### Unit Tests
 

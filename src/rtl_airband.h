@@ -47,6 +47,7 @@
 #include "filters.h"
 #include "input-common.h"  // input_t
 #include "logging.h"
+#include "pcm_writer.h"
 #include "squelch.h"
 
 #define ALIGNED32 __attribute__((aligned(32)))
@@ -105,6 +106,7 @@ enum output_type {
     O_ICECAST,
     O_FILE,
     O_RAWFILE,
+    O_PCMFILE,
     O_MIXER,
     O_UDP_STREAM
 #ifdef WITH_PULSEAUDIO
@@ -259,6 +261,10 @@ struct channel_t {
     float waveout_r[WAVE_LEN];   // right channel mixer output
     float iq_in[2 * WAVE_LEN];   // raw input samples for I/Q outputs and NFM demod
     float iq_out[2 * WAVE_LEN];  // raw output samples for I/Q outputs (FIXME: allocate only if required)
+    // Squelch state per output sample.  axcindicate only resolves to a whole WAVE_BATCH, and the
+    // zeros in waveout cannot be told from a sample that is genuinely zero, so the PCM index
+    // keeps its own record rather than inferring transmission boundaries from either.
+    unsigned char gate_out[WAVE_LEN];
 #ifdef NFM
     float pr;            // previous sample - real part
     float pj;            // previous sample - imaginary part
@@ -350,6 +356,11 @@ struct output_params_t {
 extern char const* RTL_AIRBAND_VERSION;
 
 // output.cpp
+struct pcm_file_data {
+    output_type type;
+    PcmWriter writer;
+};
+
 lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass);
 void shout_setup(icecast_data* icecast, mix_modes mixmode);
 void disable_device_outputs(device_t* dev);

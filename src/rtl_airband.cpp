@@ -633,6 +633,7 @@ void* demodulate(void* params) {
                         }
 
                         channel->axcindicate = SIGNAL;
+                        channel->gate_out[j - AGC_EXTRA] = 1;
                         if (channel->has_iq_outputs) {
                             channel->iq_out[2 * (j - AGC_EXTRA)] = real;
                             channel->iq_out[2 * (j - AGC_EXTRA) + 1] = imag;
@@ -641,6 +642,7 @@ void* demodulate(void* params) {
                         // Squelch is closed
                     } else {
                         waveout = 0;
+                        channel->gate_out[j - AGC_EXTRA] = 0;
                         if (channel->has_iq_outputs) {
                             channel->iq_out[2 * (j - AGC_EXTRA)] = 0;
                             channel->iq_out[2 * (j - AGC_EXTRA) + 1] = 0;
