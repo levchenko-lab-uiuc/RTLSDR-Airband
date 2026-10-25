@@ -283,6 +283,7 @@ add_library (rtl_airband_base OBJECT
 	output.cpp
 	rtl_airband.cpp
 	squelch.cpp
+	lookback.cpp
 	pcm_writer.cpp
 	ctcss.cpp
 	util.cpp
@@ -354,6 +355,7 @@ if(BUILD_UNITTESTS)
 	file(GLOB_RECURSE TEST_FILES "test_*.cpp")
 	list(APPEND TEST_FILES
 		squelch.cpp
+		lookback.cpp
 		pcm_writer.cpp
 		logging.cpp
 		filters.cpp

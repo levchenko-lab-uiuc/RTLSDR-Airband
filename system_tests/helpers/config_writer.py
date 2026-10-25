@@ -27,6 +27,14 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
         )
     if ch.get("pcm_output") is not None:
         entries.append({"type": "pcmfile", "template": ch["pcm_output"]})
+    if ch.get("udp_output") is not None:
+        entries.append(
+            {
+                "type": "udp_stream",
+                "address": ch["udp_output"]["address"],
+                "port": ch["udp_output"]["port"],
+            }
+        )
     if ch.get("mixer_output") is not None:
         entries.append(
             {
@@ -56,6 +64,12 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
         elif entry["type"] == "pcmfile":
             # a strftime path for the whole file; there is no separate directory
             lines.append(f'          filename_template = "{entry["template"]}";')
+        elif entry["type"] == "udp_stream":
+            lines.append(f'          dest_address = "{entry["address"]}";')
+            lines.append(f"          dest_port = {entry['port']};")
+            # continuous so the stream carries the closed-squelch samples too, as
+            # exact zeros: that is what makes the first open sample locatable.
+            lines.append("          continuous = true;")
         else:
             lines.append(f'          directory = "{entry["directory"]}";')
             lines.append(f'          filename_template = "{entry["template"]}";')
@@ -96,12 +110,18 @@ def write_config(
             - freq_hz (int): Channel center frequency in Hz.
             - modulation (str|None): "am" or "nfm", omitted if None (binary default).
             - squelch (float): Squelch threshold (0 = disabled).
+            - squelch_lookback (int|None): Squelch lookback in ms, omitted if None
+              (binary default).
             - ctcss (float|None): CTCSS tone Hz, omitted if None.
             - bandwidth (int|None): NFM demodulation bandwidth in Hz, omitted if None.
             - notch (float|None): Notch filter frequency in Hz, omitted if None.
             - output_filename_template (str): Template for MP3 output filename
               (used only when mp3_tmp_dir is provided).
             - mixer_output (dict|None): {"name": str, "balance": float}, omitted if None.
+            - udp_output (dict|None): {"address": str, "port": int}, omitted if None.
+              Emits a continuous udp_stream output, which is raw float32 of
+              channel->waveout - use it when a test needs sample resolution rather
+              than the 72 ms frames an MP3 duration can resolve.
             - scan_freqs_hz (list[int]): Scan mode only — list of frequencies in Hz.
             - split_outputs (list[dict]|None): Extra "file" outputs with
               split_on_transmission enabled, each {"directory": str, "template": str,
@@ -191,6 +211,9 @@ def write_config(
 
         if ch.get("squelch") is not None:
             lines.append(f"      squelch_snr_threshold = {ch['squelch']:.1f};")
+
+        if ch.get("squelch_lookback") is not None:
+            lines.append(f"      squelch_lookback = {int(ch['squelch_lookback'])};")
 
         lines.extend(_output_lines(ch, mp3_tmp_dir))
 

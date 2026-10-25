@@ -32,6 +32,8 @@ TIMEOUT_S = TOTAL_IQ_DURATION_S * 3 + 30
 # The fixture is a single tone bracketed by noise pads, so one transmission is expected and
 # it must be a decent fraction of the fixture rather than a fragment.
 MIN_AUDIO_S = 1.0
+# rtl_airband.h: the overlap waveout and gate_out both carry between batches
+AGC_EXTRA_SAMPLES = 100
 
 
 def pytest_generate_tests(metafunc):
@@ -176,9 +178,24 @@ def test_pcm_output(
             ), f"{wav_path.name} reports no frames, so its header was never patched"
             raw = w.readframes(frames)
 
+        samples = struct.unpack(f"<{frames}h", raw)
+
         # gated audio should not be silence
-        peak = max(abs(v) for v in struct.unpack(f"<{frames}h", raw))
+        peak = max(abs(v) for v in samples)
         assert peak > 1000, f"{wav_path.name} holds no signal (peak {peak})"
+
+        # The gate shares waveout's AGC_EXTRA overlap, so both must be read at the same
+        # offset. If they drift apart, each transmission picks up a run of samples from the
+        # closed period at one end - exact zeros, which demodulated audio does not otherwise
+        # produce in runs. Counting zeros overall is too blunt: one long transmission in a
+        # fixture hides a 100-sample shift at 0.25%. The run length is the signature.
+        longest, run = 0, 0
+        for value in samples:
+            run = run + 1 if value == 0 else 0
+            longest = max(longest, run)
+        assert (
+            longest < AGC_EXTRA_SAMPLES // 2
+        ), f"{wav_path.name} has a run of {longest} exact zeros; the gate looks misaligned with the audio"
 
         rows = _index_rows(wav_path.with_suffix(".idx"))
         assert rows, f"{wav_path.name} has an empty index"

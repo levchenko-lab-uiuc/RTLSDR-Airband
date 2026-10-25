@@ -965,6 +965,8 @@ void* output_thread(void* param) {
                     channel_t* channel = devices[i].channels + j;
                     process_outputs(channel, new_freq);
                     memcpy(channel->waveout, channel->waveout + WAVE_BATCH, AGC_EXTRA * 4);
+                    // gate_out carries the same AGC_EXTRA overlap as the audio it describes
+                    memcpy(channel->gate_out, channel->gate_out + WAVE_BATCH, AGC_EXTRA);
                 }
                 dev->waveavail = 0;
             }
@@ -988,6 +990,7 @@ void* output_thread(void* param) {
             channel_t* channel = devices[i].channels + j;
             process_outputs(channel, -1);
             memcpy(channel->waveout, channel->waveout + WAVE_BATCH, AGC_EXTRA * 4);
+            memcpy(channel->gate_out, channel->gate_out + WAVE_BATCH, AGC_EXTRA);
         }
         dev->waveavail = 0;
     }
