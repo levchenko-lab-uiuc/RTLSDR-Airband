@@ -44,6 +44,14 @@ void put_le16(unsigned char* at, uint16_t value) {
     at[1] = (unsigned char)((value >> 8) & 0xff);
 }
 
+void time_parts(time_t when, bool use_localtime, struct tm* out) {
+    if (use_localtime) {
+        localtime_r(&when, out);
+    } else {
+        gmtime_r(&when, out);
+    }
+}
+
 int16_t to_pcm16(float sample) {
     // Clipping rather than letting the cast wrap: a wrapped sample flips sign, turning a loud
     // moment into an equally loud one of the opposite polarity, which is far more audible than
@@ -62,6 +70,7 @@ int16_t to_pcm16(float sample) {
 
 PcmWriter::PcmWriter(void) {
     sample_rate_ = 0;
+    localtime_ = false;
     audio_ = NULL;
     index_ = NULL;
     orig_samples_ = 0;
@@ -79,10 +88,11 @@ PcmWriter::~PcmWriter(void) {
     close();
 }
 
-void PcmWriter::configure(const std::string& filename_template, int sample_rate) {
+void PcmWriter::configure(const std::string& filename_template, int sample_rate, bool use_localtime) {
     close();
     template_ = filename_template;
     sample_rate_ = sample_rate;
+    localtime_ = use_localtime;
 }
 
 bool PcmWriter::is_configured(void) const {
@@ -135,9 +145,9 @@ uint64_t PcmWriter::transmission_count(void) const {
     return transmissions_;
 }
 
-std::string PcmWriter::format_name(const std::string& filename_template, time_t when) {
+std::string PcmWriter::format_name(const std::string& filename_template, time_t when, bool use_localtime) {
     struct tm parts;
-    localtime_r(&when, &parts);
+    time_parts(when, use_localtime, &parts);
     std::vector<char> buffer(filename_template.size() + 256);
     // strftime returns 0 both for an empty result and for an overflow, so grow once and give up
     // rather than loop forever on a template that expands to nothing
@@ -174,7 +184,7 @@ static void make_parent_dirs(const std::string& path) {
 }
 
 void PcmWriter::open_for(time_t when) {
-    audio_path_ = format_name(template_, when);
+    audio_path_ = format_name(template_, when, localtime_);
     index_path_ = index_path_for(audio_path_);
 
     make_parent_dirs(audio_path_);
@@ -211,7 +221,7 @@ void PcmWriter::open_for(time_t when) {
     } else {
         char stamp[64];
         struct tm parts;
-        localtime_r(&when, &parts);
+        time_parts(when, localtime_, &parts);
         strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S%z", &parts);
         fprintf(index_,
                 "# transmission index for %s\n"
@@ -258,7 +268,7 @@ void PcmWriter::write(const float* samples, const unsigned char* gate, size_t co
     // Rotation is "the formatted name changed", so the template's finest field sets the period.
     // A new name also clears a previous failure: a disk that has been emptied, or a directory
     // that has been fixed, is picked up at the next file rather than needing a restart.
-    const std::string wanted = format_name(template_, now);
+    const std::string wanted = format_name(template_, now, localtime_);
     if (wanted != audio_path_) {
         close();
         failed_ = false;

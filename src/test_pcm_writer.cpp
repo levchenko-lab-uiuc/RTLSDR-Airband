@@ -98,6 +98,21 @@ TEST_F(PcmWriterTest, unconfigured_writer_does_nothing) {
     EXPECT_EQ(writer.transmission_count(), 0u);
 }
 
+TEST_F(PcmWriterTest, the_timestamp_follows_the_localtime_setting) {
+    // Every other file output stamps names in UTC unless the global `localtime` option is
+    // set, so this one has to as well - a recording named in a different timezone from the
+    // mp3 beside it is a trap for anyone lining the two up.
+    // "EST5" is a POSIX TZ string rather than a zone name, so no tzdata is needed here.
+    setenv("TZ", "EST5", 1);
+    tzset();
+    const time_t at = 1700000000;  // 2023-11-14T22:13:20Z, 17:13:20 at UTC-5
+    EXPECT_EQ(PcmWriter::format_name("%H", at, false), "22");
+    EXPECT_EQ(PcmWriter::format_name("%H", at, true), "17");
+    EXPECT_EQ(PcmWriter::format_name("%H", at), "22") << "the default must be UTC";
+    unsetenv("TZ");
+    tzset();
+}
+
 TEST_F(PcmWriterTest, format_name_expands_strftime) {
     EXPECT_EQ(PcmWriter::format_name("/tmp/plain.wav", when), "/tmp/plain.wav");
     const string dated = PcmWriter::format_name("/tmp/%Y.wav", when);

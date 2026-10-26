@@ -63,7 +63,9 @@ class PcmWriter {
 
     // filename_template is a strftime() format for the whole path.  The index is the same path
     // with its extension replaced by .idx.
-    void configure(const std::string& filename_template, int sample_rate);
+    // use_localtime matches the global `localtime` config option: false, the default, stamps
+    // names and the index header in UTC, as every other file output does.
+    void configure(const std::string& filename_template, int sample_rate, bool use_localtime = false);
 
     // One batch.  gate[i] is non-zero where the squelch was open for samples[i]; only those
     // samples reach the file, but all of them advance the original-audio position.  now is the
@@ -85,7 +87,7 @@ class PcmWriter {
 
     // Expand a strftime() template.  Exposed because the rotation rule is "the formatted name
     // changed", so a caller that wants to predict rotation needs the same expansion.
-    static std::string format_name(const std::string& filename_template, time_t when);
+    static std::string format_name(const std::string& filename_template, time_t when, bool use_localtime = false);
     // The index path for a given audio path: the extension is replaced, not appended, so the two
     // sort together and neither ends up as "x.wav.idx".
     static std::string index_path_for(const std::string& audio_path);
@@ -99,6 +101,7 @@ class PcmWriter {
 
     std::string template_;
     int sample_rate_;
+    bool localtime_;
 
     std::FILE* audio_;
     std::FILE* index_;

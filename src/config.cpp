@@ -173,7 +173,7 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
             // The template is a strftime() format for the whole path, and the file rotates
             // whenever formatting it yields a different name - so the finest field in it sets
             // the period, and "%Y%m%d_%H.wav" rotates hourly.
-            pdata->writer.configure((const char*)outs[o]["filename_template"], WAVE_RATE);
+            pdata->writer.configure((const char*)outs[o]["filename_template"], WAVE_RATE, use_localtime);
         } else if (!strncmp(outs[o]["type"], "rawfile", 7)) {
             if (parsing_mixers) {  // rawfile outputs not allowed for mixers
                 output_error(i, j, o, parsing_mixers, "rawfile output is not allowed for mixers");

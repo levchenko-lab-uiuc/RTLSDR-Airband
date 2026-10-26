@@ -379,7 +379,17 @@ the samples the squelch passed (`src/pcm_writer.cpp/h`).
 
 `filename_template` is a **strftime() format for the whole path** - there is no separate
 `directory` key, unlike `file` and `rawfile`, because the template already carries one and a
-second source of truth could disagree with it. Any directories it names are created as needed,
+second source of truth could disagree with it. It is also the whole *name*: no extension is
+appended, so a template without one produces an extensionless file that players will not
+recognise. The index derives its name by replacing that extension, and appends `.idx` only
+when there is none to replace.
+
+The timestamp is **UTC unless the global `localtime` option is set**, the same rule the `file`
+and `rawfile` outputs follow (`output.cpp:389`). `PcmWriter` takes it as a parameter rather than
+reading the global, so the unit tests can exercise both; `config.cpp` passes `use_localtime`.
+Getting this wrong is quietly expensive - a recording named in a different timezone from the
+mp3 beside it is a trap for anyone lining the two up - so
+`PcmWriterTest.the_timestamp_follows_the_localtime_setting` pins it. Any directories it names are created as needed,
 which matters because a dated tree such as `%Y/%m/%d/kcmi_%H.wav` has a directory that does not
 exist the first time each day rolls round; `fopen` alone would log a warning and record nothing.
 
