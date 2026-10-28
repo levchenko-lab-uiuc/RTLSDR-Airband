@@ -9,6 +9,14 @@ Asserting on the encoded size rather than on a header field: a bitrate that is p
 then dropped would still produce a valid MP3 with a plausible header, and only the amount
 of data actually written distinguishes one that reached LAME from one that did not.
 
+Every setting under test is encoded in a *single* run, by several channels on the same
+frequency differing only in their mp3 options.  Comparing sizes across separate runs does
+not work: fast mode replays at a speedup and tolerates a few output overruns, each of
+which drops a batch of audio, so two runs of the same config routinely differ by a few
+hundred bytes.  Measured under load, seven of eight pairs disagreed.  Channels in one run
+share the device's overruns, so whatever is dropped is dropped from all of them equally
+and the comparison holds however loaded the machine is.
+
 Parametrized over all provided binaries (non-NFM and NFM if available).
 """
 
@@ -46,14 +54,18 @@ def pytest_generate_tests(metafunc):
         )
 
 
-def _encoded_bytes(
+def _encode_variants(
     binary_under_test: BinaryUnderTest,
     run_dir: Path,
     iq_file: Path,
     speedup_factor: float,
-    mp3: dict | None,
-) -> int:
-    """Run once and return the total size of the MP3 the channel produced."""
+    variants: dict[str, dict | None],
+) -> dict[str, int]:
+    """Encode every variant in one run and return its MP3 bytes, keyed by name.
+
+    All channels sit on the same frequency, so they demodulate identical audio and share
+    any dropped batches.  They are told apart by their filename template.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
     mp3_dir = run_dir / "mp3"
     mp3_dir.mkdir(exist_ok=True)
@@ -67,19 +79,23 @@ def _encoded_bytes(
         channels=[
             {
                 "freq_hz": CENTERFREQ_HZ + CHANNEL_OFFSET_HZ,
-                "output_filename_template": "mp3_options",
+                "output_filename_template": name,
+                **(mp3 or {}),
             }
+            for name, mp3 in variants.items()
         ],
         output_dir=run_dir,
         speedup_factor=speedup_factor,
         mode="multichannel",
         mp3_tmp_dir=mp3_dir,
-        mp3=mp3,
     )
 
     run_rtl_airband(binary_under_test.path, config_path, timeout_s=TIMEOUT_S)
     time.sleep(0.5)
-    return sum(f.stat().st_size for f in mp3_dir.rglob("*.mp3"))
+    return {
+        name: sum(f.stat().st_size for f in mp3_dir.rglob(f"{name}*.mp3"))
+        for name in variants
+    }
 
 
 def test_mp3_bitrate_changes_the_encoded_size(
@@ -96,20 +112,17 @@ def test_mp3_bitrate_changes_the_encoded_size(
         cache_dir=cache_dir,
     )
 
-    low = _encoded_bytes(
+    sizes = _encode_variants(
         binary_under_test,
-        test_output_dir / "low",
+        test_output_dir,
         iq_file,
         speedup_factor,
-        {"mp3_bitrate": LOW_KBPS, "mp3_vbr": False},
+        {
+            "low": {"mp3_bitrate": LOW_KBPS, "mp3_vbr": False},
+            "high": {"mp3_bitrate": HIGH_KBPS, "mp3_vbr": False},
+        },
     )
-    high = _encoded_bytes(
-        binary_under_test,
-        test_output_dir / "high",
-        iq_file,
-        speedup_factor,
-        {"mp3_bitrate": HIGH_KBPS, "mp3_vbr": False},
-    )
+    low, high = sizes["low"], sizes["high"]
 
     assert low > 0, "no MP3 was produced at the low bitrate"
     assert high > 0, "no MP3 was produced at the high bitrate"
@@ -137,16 +150,17 @@ def test_mp3_defaults_are_unchanged(
         cache_dir=cache_dir,
     )
 
-    implicit = _encoded_bytes(
-        binary_under_test, test_output_dir / "implicit", iq_file, speedup_factor, None
-    )
-    explicit = _encoded_bytes(
+    sizes = _encode_variants(
         binary_under_test,
-        test_output_dir / "explicit",
+        test_output_dir,
         iq_file,
         speedup_factor,
-        {"mp3_bitrate": 16, "mp3_quality": 7, "mp3_vbr": True},
+        {
+            "implicit": None,
+            "explicit": {"mp3_bitrate": 16, "mp3_quality": 7, "mp3_vbr": True},
+        },
     )
+    implicit, explicit = sizes["implicit"], sizes["explicit"]
 
     assert implicit > 0, "no MP3 was produced with default settings"
     print(f"default {implicit} bytes, explicit {explicit} bytes")

@@ -149,6 +149,7 @@ def write_config(
         stats_update_interval: If provided, how often (seconds) the stats file
             is rewritten while running.
         mp3: Global encoder settings, any of mp3_bitrate, mp3_quality, mp3_vbr.
+            The same keys may be given per channel, where they win over the global.
         split_times: If provided, top-level split settings written as global
             config keys (split_min_file_time / split_max_file_time /
             split_max_idle_time / split_include_transmission_start).
@@ -224,6 +225,15 @@ def write_config(
 
         if ch.get("squelch_lookback") is not None:
             lines.append(f"      squelch_lookback = {int(ch['squelch_lookback'])};")
+
+        # Per-channel encoder settings, which override the global ones. Letting several
+        # channels in one config differ only in these is what makes a size comparison
+        # between them immune to dropped batches - they share the device's overruns.
+        for key in ("mp3_bitrate", "mp3_quality"):
+            if ch.get(key) is not None:
+                lines.append(f"      {key} = {int(ch[key])};")
+        if ch.get("mp3_vbr") is not None:
+            lines.append(f"      mp3_vbr = {'true' if ch['mp3_vbr'] else 'false'};")
 
         lines.extend(_output_lines(ch, mp3_tmp_dir))
 
