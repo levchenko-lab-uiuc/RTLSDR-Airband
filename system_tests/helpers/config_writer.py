@@ -47,6 +47,15 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
                 "balance": ch["mixer_output"]["balance"],
             }
         )
+    if ch.get("rawfile_output") is not None:
+        entries.append(
+            {
+                "type": "rawfile",
+                "directory": ch["rawfile_output"]["directory"],
+                "template": ch["output_filename_template"],
+                "continuous": ch["rawfile_output"].get("continuous", True),
+            }
+        )
     for split_out in ch.get("split_outputs") or []:
         entries.append(
             {
@@ -75,6 +84,10 @@ def _output_lines(ch: dict, mp3_tmp_dir: Path | None) -> list[str]:
             lines.append(f'          directory = "{entry["directory"]}";')
             lines.append(f'          filename_template = "{entry["template"]}";')
             lines.append("          append = false;")
+            if "continuous" in entry:
+                lines.append(
+                    f"          continuous = {'true' if entry['continuous'] else 'false'};"
+                )
             if "overrides" in entry:
                 lines.append("          split_on_transmission = true;")
                 for key, value in entry["overrides"].items():
@@ -122,6 +135,8 @@ def write_config(
               (used only when mp3_tmp_dir is provided).
             - mixer_output (dict|None): {"name": str, "balance": float}, omitted if None.
             - udp_output (dict|None): {"address": str, "port": int}, omitted if None.
+            - rawfile_output (dict|None): {"directory": str, "continuous": bool}; a
+              "rawfile" (.cf32 channel I/Q) output using output_filename_template.
               Emits a continuous udp_stream output, which is raw float32 of
               channel->waveout - use it when a test needs sample resolution rather
               than the 72 ms frames an MP3 duration can resolve.

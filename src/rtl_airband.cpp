@@ -554,26 +554,30 @@ void* demodulate(void* params) {
 
                     fparms->squelch.process_raw_sample(channel->wavein[j]);
 
-                    // If squelch is open / opening and using I/Q, then cleanup the signal and possibly update squelch.
-                    if (fparms->squelch.should_filter_sample() && channel->needs_raw_iq) {
-                        // remove phase rotation introduced by FFT sliding window
+                    // Remove the phase rotation the FFT sliding window introduces.  Done for every
+                    // sample rather than only while the squelch sees signal: the rotation advances
+                    // with every hop whether or not anything is being received, and the rawfile now
+                    // carries the closed periods, so its phase has to stay continuous across them.
+                    // Rotation leaves the magnitude alone, so wavein and the squelch are untouched.
+                    if (channel->needs_raw_iq) {
                         float swf, cwf, re_tmp, im_tmp;
                         sincosf_lut(channel->dm_phi, &swf, &cwf);
                         multiply(real, imag, cwf, -swf, &re_tmp, &im_tmp);
                         channel->dm_phi += channel->dm_dphi;
                         channel->dm_phi &= 0xffffff;
-
-                        // apply lowpass filter, will be a no-op if not configured
-                        fparms->lowpass_filter.apply(re_tmp, im_tmp);
-
-                        // update I/Q and wave
                         real = re_tmp;
                         imag = im_tmp;
-                        channel->wavein[j] = sqrt(real * real + imag * imag);
 
-                        // update squelch post-cleanup
-                        if (fparms->lowpass_filter.enabled()) {
-                            fparms->squelch.process_filtered_sample(channel->wavein[j]);
+                        // The lowpass and the squelch's filtered update stay gated as they were
+                        if (fparms->squelch.should_filter_sample()) {
+                            // apply lowpass filter, will be a no-op if not configured
+                            fparms->lowpass_filter.apply(real, imag);
+                            channel->wavein[j] = sqrt(real * real + imag * imag);
+
+                            // update squelch post-cleanup
+                            if (fparms->lowpass_filter.enabled()) {
+                                fparms->squelch.process_filtered_sample(channel->wavein[j]);
+                            }
                         }
                     }
 
@@ -712,6 +716,17 @@ void* demodulate(void* params) {
                         fade = 0.5f - 0.5f * cosf((float)M_PI * fade);
                     }
 
+                    // The raw I/Q goes out whatever the gate is doing.  It used to be zeroed while
+                    // the gate was shut, which looked harmless and was not: the I/Q here is only
+                    // AGC_EXTRA old while the gate is the lookback-delayed one, so the zeroing cut
+                    // the first (lookback - AGC_EXTRA) of every transmission - 118.75 ms at 16 kHz -
+                    // and no transmission onset ever reached the file.  A rawfile with
+                    // continuous = false still skips whole batches that carry no signal.
+                    if (channel->has_iq_outputs) {
+                        channel->iq_out[2 * (j - AGC_EXTRA)] = real;
+                        channel->iq_out[2 * (j - AGC_EXTRA) + 1] = imag;
+                    }
+
                     // If squelch is open then save samples to output
                     if (fade > 0.0f) {
                         // apply the notch filter, will be a no-op if not configured
@@ -730,18 +745,10 @@ void* demodulate(void* params) {
                         }
 
                         channel->axcindicate = SIGNAL;
-                        if (channel->has_iq_outputs) {
-                            channel->iq_out[2 * (j - AGC_EXTRA)] = real;
-                            channel->iq_out[2 * (j - AGC_EXTRA) + 1] = imag;
-                        }
 
                         // Squelch is closed
                     } else {
                         waveout = 0;
-                        if (channel->has_iq_outputs) {
-                            channel->iq_out[2 * (j - AGC_EXTRA)] = 0;
-                            channel->iq_out[2 * (j - AGC_EXTRA) + 1] = 0;
-                        }
                     }
                 }
                 memmove(channel->wavein, channel->wavein + WAVE_BATCH, (dev->waveend - WAVE_BATCH) * sizeof(float));

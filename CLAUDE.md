@@ -374,7 +374,7 @@ The stopping test is on the window's mean, not on every sample in it. An AM enve
 The per-channel (or per-frequency, as a parallel list in scan mode) `squelch_lookback` option sets the budget in milliseconds, 0-250, default 0. The delay line always holds at least `AGC_EXTRA` samples, which is the lead the AGC has always had over the audio, so a lookback of 0 leaves the timing of the audio path as it has always been. Notes:
 
 - **AM only.** NFM demodulates from the current I/Q sample rather than from the delay line; a non-zero `squelch_lookback` on an NFM channel is a config error.
-- The whole audio stream is delayed by the configured amount, so Icecast/file output runs that much later. Raw I/Q output is *not* delayed (config warns), and mixing channels with different values skews them (config warns).
+- The whole audio stream is delayed by the configured amount, so Icecast/file output runs that much later. Raw I/Q output is *not* delayed (config warns), and mixing channels with different values skews them (config warns). The `rawfile` output is therefore `lookback - AGC_EXTRA` ahead of the audio; it is no longer gated by the audio's squelch decision, for the reason given under the `rawfile` section below.
 - The backfill is keyed off `Squelch::is_open()`, not the state machine's `first_open_sample()`, so a squelch held closed by CTCSS does not release buffered audio.
 - In scan mode the delay line is dropped on retune, since what it holds belongs to the previous frequency.
 
@@ -383,6 +383,38 @@ Mixers have **no `inputs` section** — a channel connects to a mixer implicitly
 Output types: `icecast`, `file`, `rawfile`, `udp_stream`, `mixer`, `pulse`.
 
 `file`/`rawfile` outputs with `split_on_transmission = true` can set `split_include_transmission_start` (per output > global > default `false`; the global is parsed in `main()` in `src/rtl_airband.cpp`, the per-output value in `parse_split_file_times` in `src/config.cpp`). It changes only file names, never when files close. A transmission cut by `split_max_file_time` is named `<template>_<tx start>_<part start>[_<freq>]<suffix>`; part 1 repeats the tx start, and unsplit transmissions keep `<template>_<start>`. Names are built by `build_output_filename` (`src/output.cpp`). Part 1 is written under the standalone `.tmp` name and renamed to the part name in `close_if_necessary` when it is split; parts 2+ open under the part name, in the tx start's dated folder. A file that reaches max time while squelch is closed ends the transmission, as it always closed there. Examples: `config/split_include_transmission_start*.conf`.
+
+### Raw I/Q: the `rawfile` Output
+
+`rawfile` writes the channel's complex I/Q as interleaved float32 (`.cf32`) at `WAVE_RATE` -
+**16 kHz when the build has NFM**, 8 kHz otherwise. Since the squelch-lookback work it carries the
+**whole baseband**: with `continuous = true` every sample, squelch shut or not; with
+`continuous = false` whole batches with no signal are skipped as before, but the batches that are
+written are not zeroed sample by sample.
+
+It used to be zeroed wherever the audio gate was shut, and that was a trap. The I/Q written at
+loop iteration `j` is `iq_in[j - AGC_EXTRA]`, while the gate the audio path applies is the
+lookback-delayed one, `lookback` samples behind. Gating the I/Q by that decision zeroed the first
+`lookback - AGC_EXTRA` of every transmission - 118.75 ms at 16 kHz with `squelch_lookback = 125` -
+and the carrier was at full level on the very first sample the file held. Every
+start-of-transmission event sat inside that window, so the file could not be used to diagnose
+the one thing the lookback exists to fix. Verified directly on off-air captures before the
+change: `0.00 0.00 0.00 0.00` then the carrier, no rising edge.
+
+The sliding-window phase derotation (`dm_phi`) now advances on every sample when a channel needs
+raw I/Q, not only while the squelch sees signal, so the baseband phase is continuous across the
+closed periods the file now contains. The `bandwidth` lowpass and the squelch's filtered update
+stay gated exactly as they were, and rotation does not change magnitude, so `wavein` and the
+squelch see what they always saw. Proven on the AM path: the audio from a build of the changed
+source is bit-identical to a build of the unchanged source on a 20 s off-air slice.
+
+`test_rawfile` covers both `continuous` settings; `config_writer` takes a channel's
+`rawfile_output` key for it.
+
+**A testing caveat found on the way.** The build uses `-ffast-math` and `-march=native`, so two
+builds of *identical* source on different hosts (or VM instances) can differ in the last bit:
+measured at 3.6e-7 on 24% of samples. Byte-exact comparisons of `waveout` are only meaningful
+between builds made in the same environment. Two runs of one binary are bit-identical.
 
 ### MP3 Encoder Settings
 
